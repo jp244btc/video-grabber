@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- The browser extension reads these to pair itself. Same-machine only:
+     the server binds 127.0.0.1, so nothing off this PC ever sees them. -->
+<meta name="video-grabber-token" content="{{ api_token }}">
+<meta name="video-grabber-server" content="{{ server_url }}">
+<title>Video Grabber</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #dfe3e8;
+    --text: #1b1f24;
+    --muted: #656d76;
+    --accent: #2f6feb;
+    --accent-text: #ffffff;
+    --ok: #1a7f37;
+    --err: #cf222e;
+    --field: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1216;
+      --panel: #171b21;
+      --border: #2b313a;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #4a86f7;
+      --accent-text: #ffffff;
+      --ok: #3fb950;
+      --err: #f85149;
+      --field: #0f1216;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 20px 60px;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 22px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 18px; margin-bottom: 16px;
+  }
+  label { display: block; font-size: 12px; font-weight: 600;
+          color: var(--muted); margin-bottom: 5px; letter-spacing: 0.02em; }
+  input[type=text], select {
+    width: 100%; padding: 9px 11px; font-size: 14px; font-family: inherit;
+    color: var(--text); background: var(--field);
+    border: 1px solid var(--border); border-radius: 7px;
+  }
+  input[type=text]:focus, select:focus {
+    outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  button {
+    padding: 9px 16px; font-size: 14px; font-family: inherit; font-weight: 500;
+    border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel); color: var(--text); cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary {
+    background: var(--accent); color: var(--accent-text); border-color: var(--accent);
+  }
+  button.small { padding: 5px 10px; font-size: 12px; }
+  .row { display: flex; gap: 10px; align-items: flex-end; }
+  .row > * { flex: 1; }
+  .row > .fixed { flex: 0 0 auto; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .err { color: var(--err); font-size: 13px; margin-top: 10px; }
+
+  .meta { display: flex; gap: 14px; align-items: flex-start; margin-bottom: 16px; }
+  .meta img { width: 150px; border-radius: 7px; border: 1px solid var(--border); flex: 0 0 auto; }
+  .meta h2 { font-size: 15px; margin: 0 0 5px; line-height: 1.35; }
+  .meta .facts { font-size: 12px; color: var(--muted); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; }
+  details { margin-top: 14px; }
+  summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  .scroll { max-height: 260px; overflow: auto; margin-top: 10px; }
+
+  .job { border-bottom: 1px solid var(--border); padding: 12px 0; }
+  .job:last-child { border-bottom: none; }
+  .job-top { display: flex; gap: 10px; align-items: baseline; }
+  .job-name { flex: 1; font-size: 13px; word-break: break-word; }
+  .job-state { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .job-state.done { color: var(--ok); }
+  .job-state.error, .job-state.cancelled { color: var(--err); }
+  .bar { height: 5px; background: var(--border); border-radius: 3px;
+         overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); transition: width .25s; }
+  .job-msg { font-size: 12px; color: var(--muted); margin-top: 6px; word-break: break-word; }
+  .job-acts { margin-top: 8px; display: flex; gap: 8px; }
+
+  footer { max-width: 860px; margin: 0 auto; font-size: 12px; color: var(--muted); }
+  footer code { font-size: 11px; }
+  .warn { color: var(--err); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Video Grabber</h1>
+  <p class="sub">Paste a link from anywhere yt-dlp supports. The file lands in your download folder.</p>
+
+  {% if not ffmpeg_ok %}
+  <div class="panel" id="ffmpeg-panel" style="border-color:var(--err)">
+    <label style="color:var(--err)">ffmpeg is not installed</label>
+    <div class="hint" style="margin-top:0">
+      ffmpeg merges video with audio, makes MP3s, cuts clips and draws the
+      previews in the browser extension. Without it most downloads will fail.
+      The button fetches the static build published by the yt-dlp project, about
+      100 MB, into this app's own folder. Nothing else on the PC is touched.
+    </div>
+    <div class="row" style="margin-top:12px">
+      <div class="fixed"><button id="ffmpeg-install" class="primary">Install ffmpeg</button></div>
+      <div id="ffmpeg-note" class="hint" style="margin:0"></div>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="panel">
+    <label for="url">Video URL</label>
+    <div class="row">
+      <input type="text" id="url" placeholder="https://x.com/... or youtube.com/... or almost anything else"
+             autocomplete="off" spellcheck="false">
+      <div class="fixed"><button id="probe" class="primary">Look up</button></div>
+    </div>
+    <div class="hint">Press Enter to look up. You can also skip the lookup and hit Download with the defaults.</div>
+    <div id="probe-err" class="err" hidden></div>
+  </div>
+
+  <div class="panel" id="info" hidden>
+    <div class="meta">
+      <img id="thumb" hidden alt="">
+      <div>
+        <h2 id="title"></h2>
+        <div class="facts" id="facts"></div>
+      </div>
+    </div>
+    <div id="entry-box" hidden style="margin-bottom:14px">
+      <label for="entry">This post has several videos</label>
+      <select id="entry"></select>
+    </div>
+    <details id="fmt-wrap">
+      <summary>All available formats</summary>
+      <div class="scroll">
+        <table id="fmt-table">
+          <thead><tr>
+            <th>ID</th><th>Resolution</th><th>FPS</th><th>Video</th>
+            <th>Audio</th><th>kbps</th><th>Size</th><th>Note</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="hint">Pick one of these by choosing "Exact format" in the quality list.</div>
+    </details>
+  </div>
+
+  <div class="panel">
+    <div class="grid">
+      <div>
+        <label for="mode">What to grab</label>
+        <select id="mode">
+          <option value="video">Video + audio</option>
+          <option value="audio">Audio only</option>
+        </select>
+      </div>
+      <div id="quality-box">
+        <label for="quality">Quality</label>
+        <select id="quality"><option value="best">Best available</option></select>
+      </div>
+      <div id="audiofmt-box" hidden>
+        <label for="audio_format">Audio file</label>
+        <select id="audio_format">
+          <option value="mp3">MP3</option>
+          <option value="m4a">M4A</option>
+          <option value="opus">Opus</option>
+          <option value="wav">WAV</option>
+        </select>
+      </div>
+      <div>
+        <label for="cookies">Sign-in cookies</label>
+        <select id="cookies">
+          <option value="none">None</option>
+          <option value="firefox">Firefox</option>
+          <option value="edge">Edge</option>
+          <option value="chrome">Chrome</option>
+          <option value="brave">Brave</option>
+          <option value="file">cookies.txt file</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="grid" style="margin-top:12px">
+      <div>
+        <label for="start">Trim from</label>
+        <input type="text" id="start" placeholder="blank = start" autocomplete="off">
+      </div>
+      <div>
+        <label for="end">Trim to</label>
+        <input type="text" id="end" placeholder="blank = end" autocomplete="off">
+      </div>
+      <div id="cookiefile-box" hidden style="grid-column: 1 / -1">
+        <label for="cookiefile">Path to cookies.txt</label>
+        <input type="text" id="cookiefile" placeholder="C:\path\to\cookies.txt" autocomplete="off">
+      </div>
+    </div>
+    <div class="hint">Times read as <code>1:23</code>, <code>01:02:03</code> or plain seconds. Cut points are re-encoded so the clip starts exactly where you asked.</div>
+
+    <div style="margin-top:16px">
+      <button id="go" class="primary">Download</button>
+    </div>
+    <div id="go-err" class="err" hidden></div>
+  </div>
+
+  <div class="panel" id="jobs-panel" hidden>
+    <div class="row" style="margin-bottom:8px">
+      <label style="margin:0">Downloads this session</label>
+      <div class="fixed"><button id="clear" class="small">Clear finished</button></div>
+    </div>
+    <div id="jobs"></div>
+  </div>
+
+  <div class="panel">
+    <label for="dir">Save to</label>
+    <div class="row">
+      <input type="text" id="dir" value="{{ download_dir }}" autocomplete="off" spellcheck="false">
+      <div class="fixed"><button id="savedir">Save</button></div>
+    </div>
+    <div id="dir-note" class="hint"></div>
+  </div>
+
+  <div class="panel">
+    <details id="pair">
+      <summary>Browser extension</summary>
+      <div style="margin-top:14px">
+        <label for="extdir">Extension folder</label>
+        <div class="row">
+          <input type="text" id="extdir" value="{{ extension_dir }}" readonly>
+          <div class="fixed"><button class="copy" data-for="extdir">Copy</button></div>
+        </div>
+        <div class="hint">
+          To load it: open <code>edge://extensions</code> or <code>chrome://extensions</code>,
+          turn on <b>Developer mode</b>, click <b>Load unpacked</b>, and pick this
+          folder. Then come back to this page once and it pairs itself.
+        </div>
+      </div>
+      <div style="margin-top:14px">
+        <label for="srv">Server address</label>
+        <div class="row">
+          <input type="text" id="srv" value="{{ server_url }}" readonly>
+          <div class="fixed"><button class="copy" data-for="srv">Copy</button></div>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <label for="tok">API token</label>
+        <div class="row">
+          <input type="text" id="tok" value="{{ api_token }}" readonly>
+          <div class="fixed"><button class="copy" data-for="tok">Copy</button></div>
+        </div>
+      </div>
+      <div class="hint">
+        The extension pairs itself the moment this page loads, so these two
+        boxes are only a manual fallback. The token stops any web page you
+        happen to be visiting from driving this downloader behind your back, so
+        treat it like a password and do not paste it anywhere else.
+      </div>
+      <div id="pair-status" class="hint" style="color:var(--ok)"></div>
+      <div id="copy-note" class="hint"></div>
+    </details>
+  </div>
+
+</div>
+
+<footer>
+  Video Grabber {{ version }} &middot; yt-dlp {{ ytdlp_version }} &middot;
+  <button id="update" class="small">Check for yt-dlp update</button>
+  <div id="update-note" style="margin-top:8px"></div>
+</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const TOKEN = {{ api_token | tojson }};
+let pollTimer = null;
+
+function show(el, on) { el.hidden = !on; }
+function setErr(el, msg) { el.textContent = msg || ""; show(el, !!msg); }
+
+function payload() {
+  return {
+    url: $("url").value.trim(),
+    mode: $("mode").value,
+    quality: $("quality").value,
+    audio_format: $("audio_format").value,
+    cookies: $("cookies").value,
+    cookiefile: $("cookiefile").value,
+    start: $("start").value,
+    end: $("end").value,
+    title: $("title").textContent,
+    index: $("entry").value || 1,
+  };
+}
+
+async function post(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: {"Content-Type": "application/json", "X-VG-Token": TOKEN},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await res.json().catch(() => ({error: "Unreadable reply from the app."}));
+  if (!res.ok) throw new Error(data.error || "Something went wrong.");
+  return data;
+}
+
+// ---- lookup ----------------------------------------------------------
+$("probe").addEventListener("click", probe);
+$("url").addEventListener("keydown", (e) => { if (e.key === "Enter") probe(); });
+
+let lastProbedUrl = "";
+
+async function probe() {
+  const btn = $("probe");
+  setErr($("probe-err"), "");
+  btn.disabled = true;
+  btn.textContent = "Looking...";
+  // A new link must not inherit the previous post's entry choice.
+  if ($("url").value.trim() !== lastProbedUrl) {
+    $("entry").innerHTML = "";
+    show($("entry-box"), false);
+  }
+  try {
+    const d = await post("/api/probe", payload());
+    lastProbedUrl = $("url").value.trim();
+
+    const ent = $("entry");
+    ent.innerHTML = "";
+    for (const e of d.entries) {
+      const o = document.createElement("option");
+      o.value = e.index;
+      o.textContent = e.title + (e.duration_text ? "  (" + e.duration_text + ")" : "");
+      ent.appendChild(o);
+    }
+    if (d.entries.length) ent.value = d.index;
+    show($("entry-box"), d.entries.length > 1);
+    $("title").textContent = d.title;
+    const bits = [d.uploader, d.extractor, d.duration_text].filter(Boolean);
+    $("facts").textContent = bits.join("  \u00b7  ");
+    if (d.thumbnail) { $("thumb").src = d.thumbnail; show($("thumb"), true); }
+    else show($("thumb"), false);
+
+    const q = $("quality");
+    q.innerHTML = '<option value="best">Best available</option>';
+    for (const h of d.heights) {
+      const o = document.createElement("option");
+      o.value = "h:" + h;
+      o.textContent = h + "p or below";
+      q.appendChild(o);
+    }
+    const tb = $("fmt-table").querySelector("tbody");
+    tb.innerHTML = "";
+    for (const f of d.formats) {
+      const tr = document.createElement("tr");
+      for (const k of ["format_id","resolution","fps","vcodec","acodec","tbr","size","note"]) {
+        const td = document.createElement("td");
+        td.textContent = f[k] === null || f[k] === undefined ? "" : String(f[k]);
+        tr.appendChild(td);
+      }
+      tr.style.cursor = "pointer";
+      tr.title = "Use this exact format";
+      tr.addEventListener("click", () => {
+        let opt = q.querySelector('option[value="f:' + f.format_id + '"]');
+        if (!opt) {
+          opt = document.createElement("option");
+          opt.value = "f:" + f.format_id;
+          opt.textContent = "Exact format " + f.format_id + " (" + f.resolution + ")";
+          q.appendChild(opt);
+        }
+        q.value = opt.value;
+        $("fmt-wrap").open = false;
+      });
+      tb.appendChild(tr);
+    }
+    show($("info"), true);
+    if (d.is_live) setErr($("probe-err"), "This is a live stream. It will record until you cancel.");
+  } catch (e) {
+    show($("info"), false);
+    setErr($("probe-err"), e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Look up";
+  }
+}
+
+// ---- options wiring --------------------------------------------------
+$("mode").addEventListener("change", () => {
+  const audio = $("mode").value === "audio";
+  show($("quality-box"), !audio);
+  show($("audiofmt-box"), audio);
+});
+$("cookies").addEventListener("change", () => {
+  show($("cookiefile-box"), $("cookies").value === "file");
+});
+// Picking a different video in a multi-video post reloads its own formats.
+$("entry").addEventListener("change", probe);
+
+// ---- download --------------------------------------------------------
+$("go").addEventListener("click", async () => {
+  setErr($("go-err"), "");
+  $("go").disabled = true;
+  try {
+    await post("/api/download", payload());
+    show($("jobs-panel"), true);
+    startPolling();
+  } catch (e) {
+    setErr($("go-err"), e.message);
+  } finally {
+    $("go").disabled = false;
+  }
+});
+
+function startPolling() {
+  if (pollTimer) return;
+  refreshJobs();
+  pollTimer = setInterval(refreshJobs, 700);
+}
+
+async function refreshJobs() {
+  const res = await fetch("/api/jobs", {headers: {"X-VG-Token": TOKEN}});
+  const jobs = await res.json();
+  if (!jobs.length) { show($("jobs-panel"), false); return; }
+  show($("jobs-panel"), true);
+
+  const box = $("jobs");
+  box.innerHTML = "";
+  let busy = false;
+  for (const j of jobs) {
+    if (["queued","downloading","processing"].includes(j.status)) busy = true;
+    const el = document.createElement("div");
+    el.className = "job";
+
+    const top = document.createElement("div");
+    top.className = "job-top";
+    const name = document.createElement("div");
+    name.className = "job-name";
+    name.textContent = j.filename || j.title;
+    const state = document.createElement("div");
+    state.className = "job-state " + j.status;
+    state.textContent = stateText(j);
+    top.append(name, state);
+    el.appendChild(top);
+
+    if (["downloading","processing","queued"].includes(j.status)) {
+      const bar = document.createElement("div");
+      bar.className = "bar";
+      const fill = document.createElement("i");
+      fill.style.width = (j.percent || 0) + "%";
+      bar.appendChild(fill);
+      el.appendChild(bar);
+    }
+    if (j.message) {
+      const m = document.createElement("div");
+      m.className = "job-msg";
+      m.textContent = j.message;
+      el.appendChild(m);
+    }
+
+    const acts = document.createElement("div");
+    acts.className = "job-acts";
+    if (j.status === "done") {
+      const b = document.createElement("button");
+      b.className = "small";
+      b.textContent = "Show in folder";
+      b.onclick = () => post("/api/reveal", {job_id: j.id}).catch(e => alert(e.message));
+      acts.appendChild(b);
+    } else if (["queued","downloading","processing"].includes(j.status)) {
+      const b = document.createElement("button");
+      b.className = "small";
+      b.textContent = "Cancel";
+      b.onclick = () => post("/api/cancel", {job_id: j.id});
+      acts.appendChild(b);
+    }
+    if (acts.children.length) el.appendChild(acts);
+    box.appendChild(el);
+  }
+
+  if (!busy && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+}
+
+function stateText(j) {
+  if (j.status === "downloading") {
+    const parts = [(j.percent || 0).toFixed(1) + "%"];
+    if (j.speed) parts.push(j.speed);
+    if (j.eta) parts.push("ETA " + j.eta);
+    return parts.join("  \u00b7  ");
+  }
+  if (j.status === "processing") return "converting";
+  if (j.status === "done") return j.size ? "done  \u00b7  " + j.size : "done";
+  return j.status;
+}
+
+$("clear").addEventListener("click", async () => {
+  await post("/api/clear");
+  refreshJobs();
+});
+
+// ---- settings --------------------------------------------------------
+$("savedir").addEventListener("click", async () => {
+  $("dir-note").textContent = "";
+  try {
+    const d = await post("/api/settings", {download_dir: $("dir").value});
+    $("dir").value = d.download_dir;
+    $("dir-note").textContent = "Saved.";
+  } catch (e) {
+    $("dir-note").textContent = e.message;
+  }
+});
+
+for (const btn of document.querySelectorAll("button.copy")) {
+  btn.addEventListener("click", async () => {
+    const field = $(btn.dataset.for);
+    try {
+      await navigator.clipboard.writeText(field.value);
+      $("copy-note").textContent = "Copied.";
+    } catch (e) {
+      field.select();
+      $("copy-note").textContent = "Press Ctrl+C to copy the selected text.";
+    }
+  });
+}
+
+// ---- ffmpeg bootstrap ------------------------------------------------
+const ffBtn = $("ffmpeg-install");
+if (ffBtn) {
+  ffBtn.addEventListener("click", async () => {
+    ffBtn.disabled = true;
+    $("ffmpeg-note").textContent = "Starting...";
+    try {
+      await post("/api/install-ffmpeg");
+    } catch (e) {
+      $("ffmpeg-note").textContent = e.message;
+      ffBtn.disabled = false;
+      return;
+    }
+    const timer = setInterval(async () => {
+      const res = await fetch("/api/ffmpeg-status", {headers: {"X-VG-Token": TOKEN}});
+      const s = await res.json();
+      $("ffmpeg-note").textContent = s.message || s.status;
+      if (s.status === "done") {
+        clearInterval(timer);
+        $("ffmpeg-note").textContent = "Installed. Reloading...";
+        setTimeout(() => location.reload(), 1200);
+      } else if (s.status === "error") {
+        clearInterval(timer);
+        ffBtn.disabled = false;
+      }
+    }, 700);
+  });
+}
+
+$("update").addEventListener("click", async () => {
+  const note = $("update-note");
+  note.textContent = "Checking...";
+  try {
+    const d = await post("/api/update-ytdlp");
+    note.textContent = d.message;
+  } catch (e) {
+    note.textContent = e.message;
+  }
+});
+
+refreshJobs();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# Normalise line endings in the repo; check out as the platform expects.
+* text=auto
+
+# Windows-only files that should always carry CRLF on disk.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.iss text eol=crlf
+
+# Binary assets.
+*.png binary
+*.ico binary

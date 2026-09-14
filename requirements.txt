@@ -1,0 +1,17 @@
+# Pinned to the versions this app was built and tested with (Python 3.14, 2026-09).
+flask==3.1.3
+#
+# yt-dlp is deliberately NOT pinned. Sites change their players constantly and
+# a months-old yt-dlp stops working. The "Check for update" button in the app
+# footer upgrades it in place.
+yt-dlp
+#
+# yt-dlp's optional network stack. Pure Python or abi3 wheels, so they install
+# cleanly everywhere; they give it websockets, HTTP/2-friendly requests, and
+# certificate handling that does not depend on the OS store.
+requests
+urllib3
+websockets
+certifi
+mutagen
+pycryptodomex

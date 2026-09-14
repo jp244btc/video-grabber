@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Video Grabber</title>
+<style>
+  :root {
+    --bg: #ffffff; --card: #f3f5f8; --border: #dfe3e8; --field: #ffffff;
+    --text: #1b1f24; --muted: #656d76; --accent: #2f6feb; --accent-hover: #245fd4;
+    --ok: #1a7f37; --err: #cf222e; --badge: #1b1f24; --badge-text: #fff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e2128; --card: #2a2e37; --border: #3a3f4a; --field: #1e2128;
+      --text: #e6edf3; --muted: #9aa3ad; --accent: #2f8ae6; --accent-hover: #4a9cf0;
+      --ok: #3fb950; --err: #f85149; --badge: #0f1216; --badge-text: #fff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    width: 440px; margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.4 -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+  }
+  header b { flex: 1; font-size: 14px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--err); }
+  #status { font-size: 11px; color: var(--muted); }
+
+  #msg { margin: 10px 14px 0; padding: 8px 10px; border-radius: 6px; font-size: 12px; display: none; }
+  #msg.show { display: block; }
+  #msg.bad { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
+  #msg.good { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+
+  #cards { padding: 10px 14px 4px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 14px 4px 18px; text-align: center; }
+
+  .card {
+    display: grid; grid-template-columns: 126px 1fr; gap: 10px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 10px; margin-bottom: 10px;
+  }
+  .thumb {
+    position: relative; width: 126px; height: 72px; border-radius: 6px; overflow: hidden;
+    background: #000; display: flex; align-items: center; justify-content: center;
+  }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .spin {
+    width: 18px; height: 18px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,.25); border-top-color: #fff;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .thumb .dur {
+    position: absolute; left: 6px; bottom: 6px; padding: 2px 6px; border-radius: 4px;
+    background: rgba(0,0,0,.72); color: #fff; font-size: 11px; font-weight: 600;
+  }
+  .thumb .src {
+    position: absolute; left: 6px; top: 6px; padding: 1px 5px; border-radius: 4px;
+    background: rgba(0,0,0,.72); color: #fff; font-size: 10px; font-weight: 700;
+    letter-spacing: .02em; text-transform: uppercase;
+  }
+
+  .body { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+  .title-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .kind {
+    flex: 0 0 auto; font-size: 10px; font-weight: 700; padding: 1px 5px;
+    border: 1px solid var(--accent); color: var(--accent); border-radius: 4px;
+  }
+  .name {
+    flex: 1; min-width: 0; font-weight: 600; font-size: 13px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .close {
+    flex: 0 0 auto; border: 0; background: transparent; color: var(--muted);
+    font-size: 16px; line-height: 1; cursor: pointer; padding: 0 2px;
+  }
+  .close:hover { color: var(--text); }
+
+  .act { display: flex; align-items: center; gap: 8px; margin-top: auto; }
+  select {
+    flex: 1; min-width: 0; padding: 6px 8px; font: inherit; font-size: 12px;
+    font-family: ui-monospace, Consolas, monospace;
+    color: var(--text); background: var(--field);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  .dl {
+    flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: 8px; border: 0; cursor: pointer;
+    background: var(--accent); color: #fff; font: inherit; font-size: 13px; font-weight: 600;
+    min-width: 112px; justify-content: center;
+  }
+  .dl:hover:not(:disabled) { background: var(--accent-hover); }
+  .dl:disabled { opacity: .6; cursor: default; }
+  .dl.done { background: var(--ok); }
+  .dl.err { background: var(--err); }
+  .prog { height: 3px; background: var(--border); border-radius: 2px; overflow: hidden; }
+  .prog i { display: block; height: 100%; background: var(--accent); width: 0; transition: width .3s; }
+
+  .page {
+    margin: 4px 14px 10px; padding: 10px; border: 1px dashed var(--border); border-radius: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .page .t { flex: 1; min-width: 0; }
+  .page .t b { display: block; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .page .t span { font-size: 11px; color: var(--muted); }
+  .page button {
+    flex: 0 0 auto; padding: 6px 12px; border-radius: 8px; cursor: pointer; font: inherit; font-size: 12px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  }
+
+  footer { padding: 8px 14px 10px; display: flex; gap: 12px; font-size: 11px; border-top: 1px solid var(--border); }
+  footer a { color: var(--accent); text-decoration: none; cursor: pointer; }
+  footer a:hover { text-decoration: underline; }
+  footer .sp { flex: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <span class="dot" id="dot"></span>
+  <b>Video Grabber</b>
+  <span id="status">checking...</span>
+</header>
+
+<div id="msg"></div>
+
+<div id="cards"></div>
+
+<div class="page">
+  <div class="t">
+    <b id="page-title">&nbsp;</b>
+    <span>Not seeing it above? Hand the whole page to yt-dlp instead.</span>
+  </div>
+  <button id="grab-page">Grab page</button>
+</div>
+
+<footer>
+  <a id="open-app">Open full app</a>
+  <span class="sp"></span>
+  <a id="clear">Clear list</a>
+  <a id="open-options">Options</a>
+</footer>
+
+<script src="popup.js"></script>
+</body>
+</html>

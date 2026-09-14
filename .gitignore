@@ -1,0 +1,27 @@
+# Virtual environments
+.venv/
+.build-venv/
+
+# Build output
+build/VideoGrabber/
+dist/
+*.spec.bak
+
+# Per-machine state: download folder, API token, log, downloaded ffmpeg
+config.json
+video-grabber.log
+ffmpeg/
+yt-dlp-latest/
+
+# Never commit exported cookies — they are live login sessions.
+cookies.txt
+*cookies*.txt
+
+# Python cruft
+__pycache__/
+*.pyc
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store

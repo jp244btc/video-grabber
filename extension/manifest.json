@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Video Grabber",
+  "version": "1.0.0",
+  "description": "Detect video on the current page and hand it to your local yt-dlp downloader.",
+  "permissions": [
+    "webRequest",
+    "webNavigation",
+    "tabs",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["pair.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Video Grabber",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
