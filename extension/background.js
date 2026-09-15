@@ -50,9 +50,29 @@ function kindOf(url, contentType) {
  * to a single row. A busy timeline otherwise lists near-identical entries that
  * are impossible to tell apart.
  */
+/*
+ * Facebook's CDN chunks all share one directory, so the directory rule below
+ * would fold every video on a page into a single card. The efg parameter is
+ * base64 JSON naming the video; that id is the right grouping key, and the
+ * app uses the same id to fetch the whole video from the watch page.
+ */
+function fbVideoId(u) {
+  if (!/(^|\.)fbcdn\.net$/i.test(u.hostname)) return "";
+  const efg = u.searchParams.get("efg");
+  if (!efg) return "";
+  try {
+    const meta = JSON.parse(atob(efg.replace(/-/g, "+").replace(/_/g, "/")));
+    return String(meta.video_id || meta.xpv_asset_id || "");
+  } catch (e) {
+    return "";
+  }
+}
+
 function mediaKey(url) {
   try {
     const u = new URL(url);
+    const fb = fbVideoId(u);
+    if (fb) return "facebook:" + fb;
     const m = u.pathname.match(/\/(?:amplify_video|ext_tw_video|tweet_video)\/(\d+)/);
     if (m) return u.host + ":" + m[1];
     // Otherwise the containing directory, which groups renditions of one asset.
@@ -66,6 +86,8 @@ function mediaKey(url) {
 function hintFor(url) {
   try {
     const u = new URL(url);
+    const fb = fbVideoId(u);
+    if (fb) return "facebook #" + fb.slice(-6);
     const m = u.pathname.match(/\/(?:amplify_video|ext_tw_video|tweet_video)\/(\d+)/);
     if (m) return u.host.replace(/^www\./, "") + " #" + m[1].slice(-6);
     const last = u.pathname.split("/").filter(Boolean).pop() || "";

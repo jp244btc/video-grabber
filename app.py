@@ -23,7 +23,7 @@ import os
 import sys
 import time
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 PORT = 5001
 ACTUAL_PORT = PORT        # set for real at startup if the default was taken
 
@@ -70,6 +70,7 @@ import subprocess        # noqa: E402
 import tarfile           # noqa: E402
 import tempfile          # noqa: E402
 import threading         # noqa: E402
+import urllib.parse      # noqa: E402
 import urllib.request    # noqa: E402
 import uuid              # noqa: E402
 import webbrowser        # noqa: E402
@@ -362,6 +363,9 @@ def api_probe():
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "Paste a video URL first."}), 400
+    url, page_like = canonical_stream(url)
+    if page_like:
+        data["referer"] = ""
 
     cfg = load_config()
     opts = base_opts(cfg)
@@ -621,6 +625,11 @@ def api_download():
     if not url:
         return jsonify({"error": "Paste a video URL first."}), 400
 
+    # A CDN chunk becomes the page it came from; a page needs no Referer.
+    url, page_like = canonical_stream(url)
+    if page_like:
+        data["referer"] = ""
+
     job_id = uuid.uuid4().hex[:12]
     job = {
         "id": job_id,
@@ -684,6 +693,68 @@ INSPECT_CACHE = {}          # url -> (when, result)
 INSPECT_LOCK = threading.Lock()
 INSPECT_TTL = 30 * 60
 
+FB_CDN_RE = re.compile(r"(^|\.)fbcdn\.net$", re.I)
+
+
+def canonical_stream(url):
+    """Turn a sniffed CDN chunk into something yt-dlp can fetch whole.
+
+    Facebook plays DASH by requesting byte ranges of one MP4 per track, so the
+    URL the extension sees is a single, silent, header-less fragment. Its efg
+    parameter is base64 JSON that names the video, and yt-dlp's Facebook
+    extractor can fetch the whole thing, audio included, from the watch page.
+
+    Returns (url, page_like). page_like means "hand this to yt-dlp as a page,
+    not a stream": no Referer, and inspect it with yt-dlp rather than ffprobe.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        query = urllib.parse.parse_qs(parts.query)
+    except ValueError:
+        return url, False
+
+    if FB_CDN_RE.search(parts.hostname or "") and query.get("efg"):
+        try:
+            raw = query["efg"][0]
+            raw += "=" * (-len(raw) % 4)
+            meta = json.loads(base64.b64decode(raw))
+            video_id = meta.get("video_id") or meta.get("xpv_asset_id")
+            if video_id:
+                return f"https://www.facebook.com/watch/?v={video_id}", True
+        except (ValueError, TypeError):
+            pass
+
+    # Any other ranged request: ask for the whole file instead of one slice.
+    if "bytestart" in query or "byteend" in query:
+        kept = {k: v for k, v in query.items() if k not in ("bytestart", "byteend")}
+        rebuilt = parts._replace(query=urllib.parse.urlencode(kept, doseq=True))
+        return urllib.parse.urlunsplit(rebuilt), False
+
+    return url, False
+
+
+def inspect_page(url):
+    """Preview details for a page URL, via yt-dlp instead of ffprobe."""
+    result = {"duration": None, "duration_text": "", "heights": [], "thumbnail": "", "title": ""}
+    try:
+        with yt_dlp.YoutubeDL(base_opts(load_config())) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return result
+    if info.get("_type") == "playlist" and info.get("entries"):
+        entries = [e for e in info["entries"] if e]
+        info = entries[0] if entries else {}
+    result["duration"] = info.get("duration")
+    result["duration_text"] = human_duration(info.get("duration"))
+    result["heights"] = sorted(
+        {f["height"] for f in info.get("formats") or []
+         if f.get("height") and f.get("vcodec") not in (None, "none")},
+        reverse=True,
+    )
+    result["thumbnail"] = info.get("thumbnail") or ""
+    result["title"] = info.get("title") or ""
+    return result
+
 
 def inspect_media(url, referer):
     hdr = ["-headers", f"Referer: {referer}\r\n"] if referer else []
@@ -738,7 +809,15 @@ def api_inspect():
         hit = INSPECT_CACHE.get(url)
     if hit and time.time() - hit[0] < INSPECT_TTL:
         return jsonify(hit[1])
-    result = inspect_media(url, (data.get("referer") or "").strip())
+
+    canonical, page_like = canonical_stream(url)
+    if page_like:
+        result = inspect_page(canonical)
+    else:
+        result = inspect_media(canonical, (data.get("referer") or "").strip())
+        result["title"] = ""
+    result["canonical"] = canonical
+
     with INSPECT_LOCK:
         INSPECT_CACHE[url] = (time.time(), result)
     return jsonify(result)

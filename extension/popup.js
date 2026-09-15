@@ -164,7 +164,9 @@ function buildCard(item, n, connected) {
   kind.textContent = /HLS/i.test(item.kind) ? "HLS" : /DASH/i.test(item.kind) ? "DASH" : (item.kind || "MEDIA").slice(0, 5);
   const name = document.createElement("div");
   name.className = "name";
-  const fileBase = `${n} ${pageName}`;
+  // Numbered page title by default; replaced by the real title when the app
+  // can resolve one (a Facebook chunk maps back to its watch page, say).
+  let fileBase = `${n} ${pageName}`;
   name.textContent = fileBase + ".mp4";
   name.title = item.url;
   const close = document.createElement("button");
@@ -197,6 +199,11 @@ function buildCard(item, n, connected) {
   if (connected) {
     api("/api/inspect", { url: item.url, referer: tab.url }).then((d) => {
       spin.remove();
+      if (d.title) {
+        fileBase = cleanTitle(d.title);
+        name.textContent = fileBase + ".mp4";
+        name.title = d.title;
+      }
       if (d.thumbnail) {
         const img = document.createElement("img");
         img.src = d.thumbnail;
