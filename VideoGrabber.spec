@@ -20,7 +20,7 @@ hiddenimports = collect_submodules("yt_dlp")
 
 for pkg in (
     "certifi", "requests", "urllib3", "websockets", "brotli", "mutagen",
-    "Cryptodome", "charset_normalizer", "idna",
+    "Cryptodome", "charset_normalizer", "idna", "curl_cffi", "cffi",
 ):
     try:
         d, b, h = collect_all(pkg)
@@ -29,6 +29,22 @@ for pkg in (
         hiddenimports += h
     except Exception:
         pass
+
+# curl_cffi (browser TLS impersonation, which TikTok now demands) loads its
+# libcurl-impersonate DLL from a curl_cffi.libs folder beside the package via
+# os.add_dll_directory in its __init__. No hook knows about that folder, so
+# the DLLs are placed at the same relative spot inside the bundle. Its cffi
+# extension also imports _cffi_backend, which static analysis cannot see.
+import glob
+import importlib.util
+import os
+
+_curl = importlib.util.find_spec("curl_cffi")
+if _curl and _curl.origin:
+    _libs = os.path.join(os.path.dirname(os.path.dirname(_curl.origin)), "curl_cffi.libs")
+    for _dll in glob.glob(os.path.join(_libs, "*.dll")):
+        binaries.append((_dll, "curl_cffi.libs"))
+    hiddenimports += ["curl_cffi", "_cffi_backend"]
 
 a = Analysis(
     ["app.py"],

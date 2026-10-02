@@ -15,3 +15,9 @@ websockets
 certifi
 mutagen
 pycryptodomex
+#
+# Browser TLS impersonation. TikTok hands yt-dlp a "Site Maintenance" page
+# unless the request looks like a real browser; yt-dlp impersonates one
+# through curl_cffi whenever it is importable. It ships a libcurl DLL in a
+# curl_cffi.libs folder, which VideoGrabber.spec collects by hand.
+curl_cffi
