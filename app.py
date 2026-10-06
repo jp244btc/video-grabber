@@ -23,7 +23,7 @@ import os
 import sys
 import time
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 PORT = 5001
 ACTUAL_PORT = PORT        # set for real at startup if the default was taken
 
