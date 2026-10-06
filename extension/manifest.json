@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Grabber",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Detect video on the current page and hand it to your local yt-dlp downloader.",
   "permissions": [
     "webRequest",

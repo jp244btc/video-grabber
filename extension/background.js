@@ -17,6 +17,11 @@
  *  2. A single-page app changes the URL constantly without loading a new
  *     page. The list is only reset on a real top-level navigation
  *     (webNavigation.onCommitted), never on a history push.
+ *
+ * And one thing it has to get right on TikTok and YouTube, or every card is
+ * a three-second silent fragment: those players stream through Media Source
+ * Extensions, so the card has to be the page, not anything the browser
+ * fetched. See PAGE_SITES.
  */
 
 // Whole files and stream manifests worth offering.
@@ -97,6 +102,76 @@ function hintFor(url) {
   }
 }
 
+/*
+ * Sites whose player streams through Media Source Extensions. The browser
+ * never asks for a whole file: TikTok's worker pulls byte ranges of separate
+ * video and audio MP4 tracks, YouTube's pulls UMP chunks from googlevideo. A
+ * sniffed URL is therefore a silent, header-less slice, and nothing in it
+ * names the video (Facebook's chunks at least carry the id in efg; these
+ * carry only signatures). The document playing it does name the video, when
+ * it is a video page, and yt-dlp knows both sites, so the card becomes the
+ * page - the same end result as a Facebook chunk mapping back to its watch
+ * page. On a feed or a profile the document URL names nothing, and no card
+ * is better than a card that downloads a fragment.
+ *
+ *   media  the request is one of this site's media slices
+ *   page   matches the document URL and captures the video id
+ *   link   the clean URL to hand to the app
+ */
+const PAGE_SITES = [
+  {
+    name: "tiktok",
+    media: (u) => /(^|\.)tiktok(cdn(-us|-eu)?)?\.com$/i.test(u.hostname) && /\/video\/tos\//i.test(u.pathname),
+    page: /^https?:\/\/(?:www\.)?tiktok\.com\/(?:(?<user>@[^/?#]+)\/video|embed(?:\/v2)?|player\/v1)\/(?<id>\d+)/i,
+    // yt-dlp takes the video page or embed/<id>, not the embed/v2 and
+    // player/v1 shapes an embedded player's frame actually has.
+    link: (m) => (m.groups.user ? m[0] : "https://www.tiktok.com/embed/" + m.groups.id),
+  },
+  {
+    name: "youtube",
+    media: (u) => /(^|\.)googlevideo\.com$/i.test(u.hostname) && /^\/videoplayback/i.test(u.pathname),
+    page: /^https?:\/\/(?:(?:www\.|m\.|music\.)?youtube(?:-nocookie)?\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|live\/|embed\/|v\/)|youtu\.be\/)(?<id>[\w-]{11})/i,
+    link: (m) => "https://www.youtube.com/watch?v=" + m.groups.id,
+  },
+];
+
+function pageSiteFor(url) {
+  try {
+    const u = new URL(url);
+    return PAGE_SITES.find((s) => s.media(u)) || null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// The URL of the document a request was made for. Inside an iframe (an
+// embedded player on someone else's page) that is the frame's own URL; the
+// tab's URL would name the wrong thing.
+async function documentUrlFor(details, tabId) {
+  if (details.tabId >= 0 && details.frameId > 0) {
+    try {
+      const frame = await chrome.webNavigation.getFrame({ tabId, frameId: details.frameId });
+      if (frame && frame.url) return frame.url;
+    } catch (e) { /* frame already gone */ }
+  }
+  try { return (await chrome.tabs.get(tabId)).url || ""; } catch (e) { return ""; }
+}
+
+async function pageItem(site, details, tabId) {
+  const doc = await documentUrlFor(details, tabId);
+  const m = doc.match(site.page);
+  if (!m) return null;
+  const id = m.groups.id;
+  return {
+    url: site.link(m),
+    key: site.name + ":" + id,
+    kind: "MP4",
+    hint: site.name + " #" + id.slice(-6),
+    size: "",
+    at: Date.now(),
+  };
+}
+
 function prettySize(bytes) {
   const n = Number(bytes);
   if (!n || Number.isNaN(n)) return "";
@@ -173,6 +248,20 @@ function consider(details, contentType, length) {
   const url = details.url;
   if (!/^https?:/i.test(url)) return;
   if (SEGMENT_RE.test(url)) return;
+
+  // A slice from a Media Source player: the card is the page it plays on.
+  // Decided before the media checks because YouTube's slices do not even
+  // look like media (application/vnd.yt-ump, no extension).
+  const site = pageSiteFor(url);
+  if (site) {
+    serialised(async () => {
+      for (const tabId of await tabsForRequest(details)) {
+        const item = await pageItem(site, details, tabId);
+        if (item) await record(tabId, item);
+      }
+    });
+    return;
+  }
 
   const isManifest = MANIFEST_RE.test(url) || /mpegurl|dash/i.test(contentType || "");
   const looksMedia = isManifest || MEDIA_TYPE_RE.test(contentType || "") || MEDIA_URL_RE.test(url);

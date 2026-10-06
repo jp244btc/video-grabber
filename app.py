@@ -695,6 +695,19 @@ INSPECT_TTL = 30 * 60
 
 FB_CDN_RE = re.compile(r"(^|\.)fbcdn\.net$", re.I)
 
+# Video pages the extension hands over in place of a stream (PAGE_SITES in
+# extension/background.js). TikTok and YouTube play through Media Source
+# Extensions, so nothing the browser fetches is worth downloading and the
+# page itself is the card. These need yt-dlp, never ffprobe.
+PAGE_URL_RE = re.compile(
+    r"^https?://(?:www\.|m\.|music\.)?(?:"
+    r"tiktok\.com/(?:@[^/?#]+/video|embed(?:/v2)?|player/v1)/\d+"
+    r"|youtube(?:-nocookie)?\.com/(?:watch\?|shorts/|live/|embed/|v/)"
+    r"|youtu\.be/"
+    r")",
+    re.I,
+)
+
 
 def canonical_stream(url):
     """Turn a sniffed CDN chunk into something yt-dlp can fetch whole.
@@ -704,9 +717,15 @@ def canonical_stream(url):
     parameter is base64 JSON that names the video, and yt-dlp's Facebook
     extractor can fetch the whole thing, audio included, from the watch page.
 
+    TikTok and YouTube chunks name nothing, so the extension sends the page
+    URL instead; that only has to be recognised as a page.
+
     Returns (url, page_like). page_like means "hand this to yt-dlp as a page,
     not a stream": no Referer, and inspect it with yt-dlp rather than ffprobe.
     """
+    if PAGE_URL_RE.match(url):
+        return url, True
+
     try:
         parts = urllib.parse.urlsplit(url)
         query = urllib.parse.parse_qs(parts.query)
