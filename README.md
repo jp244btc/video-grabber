@@ -42,6 +42,13 @@ a single-video page that is often the better route: yt-dlp knows the site,
 picks the best rendition and names the file properly. On a feed it fails,
 because there is no one video to pick.
 
+**Zoom cloud recordings** download through their recording page, because the
+file Zoom's player fetches only works for the browser session that opened it.
+For zoom.us and nothing else, the extension hands your browser's Zoom cookies
+to the local app for that one download, so recordings behind a passcode or a
+sign-in work too. That is what the extension's cookies permission is for. The
+app never stores them.
+
 **From the app page.** Paste any link, optionally look it up to choose a
 quality, and download. Extras that the extension's cards do not expose:
 

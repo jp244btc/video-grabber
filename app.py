@@ -61,6 +61,7 @@ if sys.stdout is None or sys.stderr is None:
 
 import base64            # noqa: E402
 import glob              # noqa: E402
+import http.cookiejar    # noqa: E402
 import json              # noqa: E402
 import re                # noqa: E402
 import secrets           # noqa: E402
@@ -302,6 +303,31 @@ def cookie_opts(source, cookiefile):
     return opts
 
 
+def add_browser_cookies(ydl, cookies):
+    """Load cookies the extension read out of the browser into one job's jar.
+
+    The extension sends them only for sites whose media plays for the
+    browser's own session and nobody else's (SESSION_SITES in popup.js). They
+    stay in this YoutubeDL's memory: never in config.json, never in the log,
+    and never in a cookies.txt the user picked, which yt-dlp writes back to on
+    close - so with one of those in play they are skipped.
+    """
+    if not cookies or ydl.params.get("cookiefile"):
+        return
+    for c in cookies:
+        try:
+            domain = str(c["domain"])
+            expires = c.get("expirationDate")
+            ydl.cookiejar.set_cookie(http.cookiejar.Cookie(
+                0, str(c["name"]), str(c["value"]), None, False,
+                domain, True, domain.startswith("."),
+                str(c.get("path") or "/"), True, bool(c.get("secure")),
+                int(expires) if expires else None, False, None, None, {},
+            ))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+
 def base_opts(cfg):
     opts = {
         "noplaylist": True,
@@ -363,7 +389,7 @@ def api_probe():
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "Paste a video URL first."}), 400
-    url, page_like = canonical_stream(url)
+    url, page_like = canonical_stream(url, (data.get("referer") or "").strip())
     if page_like:
         data["referer"] = ""
 
@@ -594,6 +620,7 @@ def run_job(job_id, data):
 
     try:
         with yt_dlp.YoutubeDL(opts) as ydl:
+            add_browser_cookies(ydl, data.get("browser_cookies"))
             info = ydl.extract_info(job["url"], download=True)
             if info.get("_type") == "playlist" and info.get("entries"):
                 info = [e for e in info["entries"] if e][0]
@@ -626,7 +653,7 @@ def api_download():
         return jsonify({"error": "Paste a video URL first."}), 400
 
     # A CDN chunk becomes the page it came from; a page needs no Referer.
-    url, page_like = canonical_stream(url)
+    url, page_like = canonical_stream(url, (data.get("referer") or "").strip())
     if page_like:
         data["referer"] = ""
 
@@ -708,8 +735,20 @@ PAGE_URL_RE = re.compile(
     re.I,
 )
 
+# Zoom cloud recordings. The player's file comes from ssrweb.zoom.us, which
+# answers 403 unless the request carries both a zoom.us Referer and the
+# cookies of the very session that asked for the link - so a sniffed file URL
+# fails from here even with a fresh zoom.us session of the app's own. yt-dlp's
+# Zoom extractor opens the recording page and gets a link and cookies that
+# match, so a Zoom file played on a recording page becomes that page.
+ZOOM_HOST_RE = re.compile(r"(^|\.)zoom\.us$", re.I)
+ZOOM_PAGE_RE = re.compile(
+    r"^https?://(?:[\w-]+\.)*zoom\.us/(?:rec(?:ording)?/(?:play|share)|clips/share)/[\w.-]+",
+    re.I,
+)
 
-def canonical_stream(url):
+
+def canonical_stream(url, referer=""):
     """Turn a sniffed CDN chunk into something yt-dlp can fetch whole.
 
     Facebook plays DASH by requesting byte ranges of one MP4 per track, so the
@@ -720,10 +759,13 @@ def canonical_stream(url):
     TikTok and YouTube chunks name nothing, so the extension sends the page
     URL instead; that only has to be recognised as a page.
 
+    A Zoom recording file is only good to the browser that loaded it, so it
+    becomes the recording page it was playing on (the referer).
+
     Returns (url, page_like). page_like means "hand this to yt-dlp as a page,
     not a stream": no Referer, and inspect it with yt-dlp rather than ffprobe.
     """
-    if PAGE_URL_RE.match(url):
+    if PAGE_URL_RE.match(url) or ZOOM_PAGE_RE.match(url):
         return url, True
 
     try:
@@ -731,6 +773,9 @@ def canonical_stream(url):
         query = urllib.parse.parse_qs(parts.query)
     except ValueError:
         return url, False
+
+    if ZOOM_HOST_RE.search(parts.hostname or "") and ZOOM_PAGE_RE.match(referer or ""):
+        return referer, True
 
     if FB_CDN_RE.search(parts.hostname or "") and query.get("efg"):
         try:
@@ -752,11 +797,12 @@ def canonical_stream(url):
     return url, False
 
 
-def inspect_page(url):
+def inspect_page(url, cookies=None):
     """Preview details for a page URL, via yt-dlp instead of ffprobe."""
     result = {"duration": None, "duration_text": "", "heights": [], "thumbnail": "", "title": ""}
     try:
         with yt_dlp.YoutubeDL(base_opts(load_config())) as ydl:
+            add_browser_cookies(ydl, cookies)
             info = ydl.extract_info(url, download=False)
     except Exception:
         return result
@@ -824,21 +870,25 @@ def api_inspect():
     url = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "No URL."}), 400
+    # A page that only opens for the browser's session can fail without its
+    # cookies and work with them; neither answer may stand in for the other.
+    cache_key = url + (" +session" if data.get("browser_cookies") else "")
     with INSPECT_LOCK:
-        hit = INSPECT_CACHE.get(url)
+        hit = INSPECT_CACHE.get(cache_key)
     if hit and time.time() - hit[0] < INSPECT_TTL:
         return jsonify(hit[1])
 
-    canonical, page_like = canonical_stream(url)
+    referer = (data.get("referer") or "").strip()
+    canonical, page_like = canonical_stream(url, referer)
     if page_like:
-        result = inspect_page(canonical)
+        result = inspect_page(canonical, data.get("browser_cookies"))
     else:
-        result = inspect_media(canonical, (data.get("referer") or "").strip())
+        result = inspect_media(canonical, referer)
         result["title"] = ""
     result["canonical"] = canonical
 
     with INSPECT_LOCK:
-        INSPECT_CACHE[url] = (time.time(), result)
+        INSPECT_CACHE[cache_key] = (time.time(), result)
     return jsonify(result)
 
 

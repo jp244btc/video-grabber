@@ -48,6 +48,37 @@ function cleanTitle(t) {
   return (t || "video").replace(/[\/\\:*?"<>|]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60);
 }
 
+/*
+ * Sites whose video plays only for the browser's own session. Zoom's
+ * recording CDN refuses any request without the cookies of the session that
+ * opened the player, and a recording behind a passcode or a sign-in opens
+ * only for a browser that already got past it. For these the popup sends the
+ * page's cookies with the request; the app uses them for that one job and
+ * keeps nothing.
+ */
+const SESSION_SITES = [/(^|\.)zoom\.us$/i];
+
+async function sessionCookies(...urls) {
+  if (!chrome.cookies) return [];
+  const jar = new Map();
+  for (const url of urls) {
+    let host = "";
+    try { host = new URL(url).hostname; } catch (e) { continue; }
+    if (!SESSION_SITES.some((re) => re.test(host))) continue;
+    for (const c of await chrome.cookies.getAll({ url })) {
+      jar.set(`${c.domain} ${c.path} ${c.name}`, {
+        domain: c.domain,
+        path: c.path,
+        name: c.name,
+        value: c.value,
+        secure: c.secure,
+        expirationDate: c.expirationDate,
+      });
+    }
+  }
+  return [...jar.values()];
+}
+
 function sourceBadge(url) {
   try {
     const h = new URL(url).host.replace(/^www\./, "");
@@ -197,7 +228,9 @@ function buildCard(item, n, connected) {
 
   // --- fetch preview details -------------------------------------------
   if (connected) {
-    api("/api/inspect", { url: item.url, referer: tab.url }).then((d) => {
+    sessionCookies(tab.url, item.url).then((jar) =>
+      api("/api/inspect", { url: item.url, referer: tab.url, browser_cookies: jar })
+    ).then((d) => {
       spin.remove();
       if (d.title) {
         fileBase = cleanTitle(d.title);
@@ -247,6 +280,7 @@ function buildCard(item, n, connected) {
         quality: audio ? "best" : sel.value,
         audio_format: "mp3",
         cookies: "none",
+        browser_cookies: await sessionCookies(tab.url, item.url),
         filename_hint: fileBase,
         title: fileBase,
       });
@@ -305,7 +339,10 @@ $("grab-page").addEventListener("click", async (e) => {
   b.disabled = true;
   b.textContent = "Sending…";
   try {
-    await api("/api/download", { url: tab.url, mode: "video", quality: "best", cookies: "none", referer: "" });
+    await api("/api/download", {
+      url: tab.url, mode: "video", quality: "best", cookies: "none", referer: "",
+      browser_cookies: await sessionCookies(tab.url),
+    });
     b.textContent = "Sent";
     say("Handed to yt-dlp. Progress is in the full app.", true);
   } catch (err) {
