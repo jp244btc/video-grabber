@@ -61,16 +61,40 @@ function kindOf(url, contentType) {
  * base64 JSON naming the video; that id is the right grouping key, and the
  * app uses the same id to fetch the whole video from the watch page.
  */
-function fbVideoId(u) {
-  if (!/(^|\.)fbcdn\.net$/i.test(u.hostname)) return "";
+function efgMeta(u) {
   const efg = u.searchParams.get("efg");
-  if (!efg) return "";
+  if (!efg) return null;
   try {
     const meta = JSON.parse(atob(efg.replace(/-/g, "+").replace(/_/g, "/")));
-    return String(meta.video_id || meta.xpv_asset_id || "");
+    return meta && typeof meta === "object" ? meta : null;
   } catch (e) {
-    return "";
+    return null;
   }
+}
+
+function fbVideoId(u) {
+  if (!/(^|\.)fbcdn\.net$/i.test(u.hostname)) return "";
+  const meta = efgMeta(u);
+  return meta ? String(meta.video_id || meta.xpv_asset_id || "") : "";
+}
+
+/*
+ * Instagram streams from the same CDN as Facebook, with the same efg tag, so
+ * a chunk's host alone does not say which site it is. Instagram's hosts are
+ * instagram.*.fbcdn.net or *.cdninstagram.com, and its efg names the ig
+ * client and carries no video_id, only an asset id no Facebook watch page
+ * knows. Such a chunk must not be keyed as a Facebook video; it belongs to
+ * the Instagram entry in PAGE_SITES.
+ */
+function instagramMedia(u) {
+  const video = u.searchParams.has("efg") || /\.(mp4|m4a)$/i.test(u.pathname);
+  if (/(^|\.)cdninstagram\.com$/i.test(u.hostname)) return video;
+  if (!/(^|\.)fbcdn\.net$/i.test(u.hostname)) return false;
+  if (/^instagram\./i.test(u.hostname)) return video;
+  const meta = efgMeta(u);
+  if (!meta) return false;
+  const tag = String(meta.vencode_tag || "").toLowerCase();
+  return meta.client_name === "ig" || tag.includes("instagram") || tag.startsWith("ig-");
 }
 
 function mediaKey(url) {
@@ -109,7 +133,7 @@ function hintFor(url) {
  * sniffed URL is therefore a silent, header-less slice, and nothing in it
  * names the video (Facebook's chunks at least carry the id in efg; these
  * carry only signatures). The document playing it does name the video, when
- * it is a video page, and yt-dlp knows both sites, so the card becomes the
+ * it is a video page, and yt-dlp knows these sites, so the card becomes the
  * page - the same end result as a Facebook chunk mapping back to its watch
  * page. On a feed or a profile the document URL names nothing, and no card
  * is better than a card that downloads a fragment.
@@ -132,6 +156,17 @@ const PAGE_SITES = [
     media: (u) => /(^|\.)googlevideo\.com$/i.test(u.hostname) && /^\/videoplayback/i.test(u.pathname),
     page: /^https?:\/\/(?:(?:www\.|m\.|music\.)?youtube(?:-nocookie)?\.com\/(?:watch\?(?:[^#]*&)?v=|shorts\/|live\/|embed\/|v\/)|youtu\.be\/)(?<id>[\w-]{11})/i,
     link: (m) => "https://www.youtube.com/watch?v=" + m.groups.id,
+  },
+  {
+    // Instagram plays like Facebook: byte ranges of one MP4 per track, so a
+    // chunk is a silent slice. Facebook's id maps to a watch page; Instagram's
+    // asset id maps to nothing, and the post page is the only name the video
+    // has. The home feed never changes its URL, so it gets no card; the Reels
+    // tab, a reel, a post and an embed all do.
+    name: "instagram",
+    media: instagramMedia,
+    page: /^https?:\/\/(?:www\.)?instagram\.com\/(?:[^/?#]+\/)?(?<kind>reels?|p|tv)\/(?!audio\/)(?<id>[\w-]+)/i,
+    link: (m) => `https://www.instagram.com/${m.groups.kind.toLowerCase().replace(/^reels$/, "reel")}/${m.groups.id}/`,
   },
 ];
 

@@ -49,6 +49,15 @@ to the local app for that one download, so recordings behind a passcode or a
 sign-in work too. That is what the extension's cookies permission is for. The
 app never stores them.
 
+**Instagram** reels and posts download through their page as well. Instagram
+streams from Facebook's CDN, and a chunk of it names nothing a watch page
+could find, so the card is made for the reel, post or Reels-tab page that is
+playing and yt-dlp fetches the whole video from there. The home feed keeps
+one URL for everything it plays, so it gets no card: open the reel. Your
+Instagram cookies travel with the request the way Zoom's do, which keeps
+public posts clear of the anonymous rate limit and lets yt-dlp use the
+signed-in API for posts only your account can see.
+
 **From the app page.** Paste any link, optionally look it up to choose a
 quality, and download. Extras that the extension's cards do not expose:
 

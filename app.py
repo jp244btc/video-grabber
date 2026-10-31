@@ -722,15 +722,33 @@ INSPECT_TTL = 30 * 60
 
 FB_CDN_RE = re.compile(r"(^|\.)fbcdn\.net$", re.I)
 
+# Instagram streams from the same CDN as Facebook, with the same efg tag, so
+# the host alone does not say which site a chunk belongs to. Instagram's own
+# hosts are instagram.*.fbcdn.net and *.cdninstagram.com; on any other fbcdn
+# host its efg still names the ig client and carries no video_id, only an
+# asset id that no Facebook watch page knows.
+IG_CDN_RE = re.compile(r"(^|\.)cdninstagram\.com$|^instagram\.[\w-]+\.fna\.fbcdn\.net$", re.I)
+
+# One Instagram post, reel or IGTV page. The feed shapes (instagram.com/ and
+# /reels/<id>/) are left out on purpose: the referer the popup sends is
+# whatever the tab shows when the card is used, and on a feed that is not
+# necessarily the post the chunk came from.
+IG_POST_RE = re.compile(
+    r"^https?://(?:www\.)?instagram\.com/(?:[^/?#]+/)?(?:reel|p|tv)/(?!audio/)[\w-]+",
+    re.I,
+)
+
 # Video pages the extension hands over in place of a stream (PAGE_SITES in
 # extension/background.js). TikTok and YouTube play through Media Source
 # Extensions, so nothing the browser fetches is worth downloading and the
-# page itself is the card. These need yt-dlp, never ffprobe.
+# page itself is the card; an Instagram chunk names its post nowhere, so the
+# page is the card there too. These need yt-dlp, never ffprobe.
 PAGE_URL_RE = re.compile(
     r"^https?://(?:www\.|m\.|music\.)?(?:"
     r"tiktok\.com/(?:@[^/?#]+/video|embed(?:/v2)?|player/v1)/\d+"
     r"|youtube(?:-nocookie)?\.com/(?:watch\?|shorts/|live/|embed/|v/)"
     r"|youtu\.be/"
+    r"|instagram\.com/(?:[^/?#]+/)?(?:reels?|p|tv)/(?!audio/)[\w-]+"
     r")",
     re.I,
 )
@@ -748,6 +766,27 @@ ZOOM_PAGE_RE = re.compile(
 )
 
 
+def efg_meta(query):
+    """The decoded efg parameter of a Facebook-CDN URL (base64 JSON), or {}."""
+    raw = (query.get("efg") or [""])[0]
+    if not raw:
+        return {}
+    raw += "=" * (-len(raw) % 4)
+    try:
+        meta = json.loads(base64.urlsafe_b64decode(raw))
+    except (ValueError, TypeError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def is_instagram_chunk(hostname, meta):
+    """Instagram or Facebook? Decided by the host, then by what efg says."""
+    if IG_CDN_RE.search(hostname):
+        return True
+    tag = str(meta.get("vencode_tag") or "").lower()
+    return meta.get("client_name") == "ig" or "instagram" in tag or tag.startswith("ig-")
+
+
 def canonical_stream(url, referer=""):
     """Turn a sniffed CDN chunk into something yt-dlp can fetch whole.
 
@@ -761,6 +800,11 @@ def canonical_stream(url, referer=""):
 
     A Zoom recording file is only good to the browser that loaded it, so it
     becomes the recording page it was playing on (the referer).
+
+    An Instagram chunk looks like a Facebook one, but its id names no watch
+    page. The extension sends the post page in its place; a chunk that still
+    arrives raw becomes the post page it was playing on, when the referer is
+    one, and is otherwise fetched whole like any other ranged file.
 
     Returns (url, page_like). page_like means "hand this to yt-dlp as a page,
     not a stream": no Referer, and inspect it with yt-dlp rather than ffprobe.
@@ -777,16 +821,16 @@ def canonical_stream(url, referer=""):
     if ZOOM_HOST_RE.search(parts.hostname or "") and ZOOM_PAGE_RE.match(referer or ""):
         return referer, True
 
-    if FB_CDN_RE.search(parts.hostname or "") and query.get("efg"):
-        try:
-            raw = query["efg"][0]
-            raw += "=" * (-len(raw) % 4)
-            meta = json.loads(base64.b64decode(raw))
+    host = parts.hostname or ""
+    if FB_CDN_RE.search(host) or IG_CDN_RE.search(host):
+        meta = efg_meta(query)
+        if is_instagram_chunk(host, meta):
+            if IG_POST_RE.match(referer or ""):
+                return referer, True
+        else:
             video_id = meta.get("video_id") or meta.get("xpv_asset_id")
             if video_id:
                 return f"https://www.facebook.com/watch/?v={video_id}", True
-        except (ValueError, TypeError):
-            pass
 
     # Any other ranged request: ask for the whole file instead of one slice.
     if "bytestart" in query or "byteend" in query:
@@ -809,8 +853,21 @@ def inspect_page(url, cookies=None):
     if info.get("_type") == "playlist" and info.get("entries"):
         entries = [e for e in info["entries"] if e]
         info = entries[0] if entries else {}
-    result["duration"] = info.get("duration")
-    result["duration_text"] = human_duration(info.get("duration"))
+    duration = info.get("duration")
+    if duration is None:
+        # Instagram's extractor reports no length, but the CDN URLs it hands
+        # back carry one in their efg tag.
+        for f in info.get("formats") or []:
+            try:
+                meta = efg_meta(urllib.parse.parse_qs(urllib.parse.urlsplit(f.get("url") or "").query))
+                seconds = float(meta.get("duration_s") or 0)
+            except (ValueError, TypeError):
+                continue
+            if seconds > 0:
+                duration = seconds
+                break
+    result["duration"] = duration
+    result["duration_text"] = human_duration(duration)
     result["heights"] = sorted(
         {f["height"] for f in info.get("formats") or []
          if f.get("height") and f.get("vcodec") not in (None, "none")},

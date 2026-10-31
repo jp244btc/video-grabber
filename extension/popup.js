@@ -52,11 +52,13 @@ function cleanTitle(t) {
  * Sites whose video plays only for the browser's own session. Zoom's
  * recording CDN refuses any request without the cookies of the session that
  * opened the player, and a recording behind a passcode or a sign-in opens
- * only for a browser that already got past it. For these the popup sends the
- * page's cookies with the request; the app uses them for that one job and
- * keeps nothing.
+ * only for a browser that already got past it. Instagram answers anonymous
+ * lookups for public posts but rate-limits them quickly and hides private
+ * ones; with the browser's own session yt-dlp uses the signed-in API. For
+ * these the popup sends the page's cookies with the request; the app uses
+ * them for that one job and keeps nothing.
  */
-const SESSION_SITES = [/(^|\.)zoom\.us$/i];
+const SESSION_SITES = [/(^|\.)zoom\.us$/i, /(^|\.)instagram\.com$/i];
 
 async function sessionCookies(...urls) {
   if (!chrome.cookies) return [];
@@ -85,14 +87,41 @@ function sourceBadge(url) {
     if (/twimg|twitter|x\.com/.test(h)) return "X";
     if (/youtube|googlevideo|ytimg/.test(h)) return "YT";
     if (/vimeo/.test(h)) return "Vimeo";
+    if (/instagram/.test(h)) return "IG";
     if (/fbcdn|facebook/.test(h)) return "FB";
     if (/tiktok/.test(h)) return "TikTok";
     return h.split(".").slice(-2, -1)[0] || h;
   } catch (e) { return ""; }
 }
 
+/*
+ * The extension is loaded unpacked, so this file and manifest.json are read
+ * from disk every time the popup opens, while background.js stays whatever
+ * was loaded. When the manifest on disk is newer than the running one, the
+ * folder has been updated underneath the browser: reload the extension so
+ * the service worker catches up, instead of asking for a trip to
+ * edge://extensions. A reload empties the detected list for every tab.
+ */
+async function reloadIfUpdated() {
+  let onDisk = "";
+  try {
+    onDisk = (await (await fetch(chrome.runtime.getURL("manifest.json"))).json()).version || "";
+  } catch (e) {
+    return false;
+  }
+  if (!onDisk || onDisk === chrome.runtime.getManifest().version) return false;
+  // One try per minute, so a reload that does not take cannot loop.
+  const last = Number((await chrome.storage.local.get("selfReloadAt")).selfReloadAt || 0);
+  if (Date.now() - last < 60000) return false;
+  await chrome.storage.local.set({ selfReloadAt: Date.now() });
+  say(`Extension updated to ${onDisk}; reloading. Play the video again, then reopen this popup.`, true);
+  setTimeout(() => chrome.runtime.reload(), 1200);
+  return true;
+}
+
 async function init() {
   cfg = Object.assign({}, DEFAULTS, await chrome.storage.sync.get(DEFAULTS));
+  if (await reloadIfUpdated()) return;
 
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   tab = tabs[0];
