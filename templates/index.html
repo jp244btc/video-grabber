@@ -113,6 +113,17 @@
   <h1>Video Grabber</h1>
   <p class="sub">Paste a link from anywhere yt-dlp supports. The file lands in your download folder.</p>
 
+  <div class="panel" id="update-panel" hidden style="border-color:var(--accent)">
+    <label style="color:var(--accent)">A newer Video Grabber is out</label>
+    <div class="hint" style="margin-top:0" id="update-text"></div>
+    <div class="row" style="margin-top:12px; align-items:center">
+      <div class="fixed" id="update-install-box"><button id="update-install" class="primary">Upgrade now</button></div>
+      <div class="fixed"><button id="update-skip" class="small">Skip this version</button></div>
+      <div class="fixed"><a id="update-link" href="#" target="_blank" rel="noopener" style="font-size:13px">What changed</a></div>
+      <div id="update-progress" class="hint" style="margin:0"></div>
+    </div>
+  </div>
+
   {% if not ffmpeg_ok %}
   <div class="panel" id="ffmpeg-panel" style="border-color:var(--err)">
     <label style="color:var(--err)">ffmpeg is not installed</label>
@@ -286,6 +297,10 @@
 <footer>
   Video Grabber {{ version }} &middot; yt-dlp {{ ytdlp_version }} &middot;
   <button id="update" class="small">Check for yt-dlp update</button>
+  <button id="app-update" class="small">Check for app update</button>
+  <label for="update-auto" style="display:inline; font-weight:normal; letter-spacing:0; margin-left:4px">
+    <input type="checkbox" id="update-auto" {% if update_check %}checked{% endif %}> check daily
+  </label>
   <div id="update-note" style="margin-top:8px"></div>
 </footer>
 
@@ -578,6 +593,110 @@ $("update").addEventListener("click", async () => {
     note.textContent = e.message;
   }
 });
+
+// ---- app updates -----------------------------------------------------
+const CURRENT = {{ version | tojson }};
+
+function showUpdate(u) {
+  const panel = $("update-panel");
+  if (!u || !u.available) { show(panel, false); return; }
+  $("update-text").textContent = u.can_install
+    ? `Video Grabber ${u.latest} is available; this is ${u.current}. Upgrading downloads the installer, checks it, and restarts the app on the new version.`
+    : `Video Grabber ${u.latest} is available; this is ${u.current}. This copy runs from source: pull the repository and restart to update.`;
+  show($("update-install-box"), !!u.can_install);
+  $("update-link").href = u.url || "https://github.com/jp244btc/video-grabber/releases";
+  show(panel, true);
+}
+
+async function getUpdate() {
+  const res = await fetch("/api/update", {headers: {"X-VG-Token": TOKEN}});
+  if (!res.ok) throw new Error("Server said " + res.status);
+  return res.json();
+}
+
+$("app-update").addEventListener("click", async () => {
+  const note = $("update-note");
+  note.textContent = "Asking GitHub...";
+  try {
+    const u = await post("/api/update/check");
+    showUpdate(u);
+    note.textContent = u.message || (u.available
+      ? `Version ${u.latest} is available.`
+      : `This is the newest version (${u.current}).`);
+  } catch (e) {
+    note.textContent = e.message;
+  }
+});
+
+$("update-auto").addEventListener("change", async () => {
+  try {
+    await post("/api/settings", {update_check: $("update-auto").checked});
+  } catch (e) {
+    $("update-note").textContent = e.message;
+  }
+});
+
+$("update-skip").addEventListener("click", async () => {
+  try {
+    const u = await getUpdate();
+    await post("/api/update/skip", {version: u.latest});
+    show($("update-panel"), false);
+  } catch (e) {
+    $("update-progress").textContent = e.message;
+  }
+});
+
+$("update-install").addEventListener("click", async () => {
+  const btn = $("update-install");
+  const skip = $("update-skip");
+  const prog = $("update-progress");
+  btn.disabled = skip.disabled = true;
+  try {
+    await post("/api/update/install");
+  } catch (e) {
+    prog.textContent = e.message;
+    btn.disabled = skip.disabled = false;
+    return;
+  }
+  let misses = 0;
+  const timer = setInterval(async () => {
+    let u;
+    try {
+      u = await getUpdate();
+    } catch (e) {
+      // The app has quit for the installer; keep knocking until the new copy answers.
+      misses += 1;
+      prog.textContent = "Installing... this page reconnects once the new version is up.";
+      if (misses > 400) {
+        clearInterval(timer);
+        prog.textContent = "The app has not come back. Start Video Grabber from the Start menu.";
+      }
+      return;
+    }
+    if (u.current && u.current !== CURRENT) {
+      clearInterval(timer);
+      sessionStorage.setItem("updatedFrom", CURRENT);
+      location.reload();
+    } else if (u.status === "downloading") {
+      prog.textContent = `Downloading ${u.latest}... ${u.percent}%`;
+    } else if (u.status === "installing") {
+      prog.textContent = u.message;
+    } else if (u.status === "error") {
+      clearInterval(timer);
+      prog.textContent = u.message;
+      btn.disabled = skip.disabled = false;
+    }
+  }, 700);
+});
+
+(async () => {
+  const from = sessionStorage.getItem("updatedFrom");
+  if (from) {
+    sessionStorage.removeItem("updatedFrom");
+    $("update-note").textContent = `Updated from ${from} to ${CURRENT}.`;
+  }
+  try { showUpdate(await getUpdate()); } catch (e) { /* nothing to show */ }
+})();
 
 refreshJobs();
 </script>

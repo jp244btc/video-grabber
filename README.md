@@ -77,6 +77,16 @@ starts failing on the big ones. The **Check for yt-dlp update** button at the
 bottom of the app page fetches the newest release in place. Restart the app
 afterwards. This is the first thing to try when a link that used to work stops.
 
+The app itself checks GitHub for a newer release once a day (turn that off
+with the **check daily** box at the bottom of the page, or ask any time with
+**Check for app update**). When there is one, the page says so with a link to
+what changed, and **Upgrade now** does the rest: the installed app downloads
+the installer from this project's GitHub release, checks it against the
+SHA-256 GitHub publishes for it, quits, installs silently and starts again
+with your settings. Nothing is fetched from anywhere else. A copy running from
+source gets the notice and the link; `git pull` is its update. **Skip this
+version** keeps a release you do not want out of your way.
+
 If the extension says it cannot reach the downloader, the app is not running.
 Start it from the Start Menu. If it keeps happening, look at
 `%LOCALAPPDATA%\Video Grabber\video-grabber.log`.

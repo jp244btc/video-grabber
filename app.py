@@ -61,6 +61,7 @@ if sys.stdout is None or sys.stderr is None:
 
 import base64            # noqa: E402
 import glob              # noqa: E402
+import hashlib           # noqa: E402
 import http.cookiejar    # noqa: E402
 import json              # noqa: E402
 import re                # noqa: E402
@@ -108,6 +109,8 @@ def default_download_dir():
 DEFAULTS = {
     "download_dir": default_download_dir(),
     "template": "%(uploader_id,uploader,extractor)s - %(title).80s [%(id)s].%(ext)s",
+    "update_check": True,     # ask GitHub for a newer release once a day
+    "update_skip": "",        # a release the user chose not to hear about again
 }
 
 
@@ -376,7 +379,9 @@ def allow_extension(resp):
 @app.route("/api/ping")
 def api_ping():
     """The extension calls this to tell 'server down' from 'wrong token'."""
-    return jsonify({"ok": True, "ytdlp": yt_dlp.version.__version__, "version": VERSION})
+    with UPDATE_LOCK:
+        update = UPDATE_STATE["latest"] if UPDATE_STATE["available"] else ""
+    return jsonify({"ok": True, "ytdlp": yt_dlp.version.__version__, "version": VERSION, "update": update})
 
 
 # --------------------------------------------------------------------------
@@ -980,11 +985,14 @@ def api_settings():
             cfg["download_dir"] = newdir
         if data.get("template"):
             cfg["template"] = data["template"]
+        if "update_check" in data:
+            cfg["update_check"] = bool(data["update_check"])
         save_config(cfg)
     return jsonify(
         {
             "download_dir": cfg["download_dir"],
             "template": cfg["template"],
+            "update_check": bool(cfg.get("update_check", True)),
             "ffmpeg": FFMPEG_DIR or "",
             "ytdlp_version": yt_dlp.version.__version__,
             "version": VERSION,
@@ -1084,12 +1092,275 @@ def api_update_ytdlp():
     )
 
 
+# --------------------------------------------------------------------------
+# App updates. Once a day the app asks GitHub for the newest release and, when
+# it is newer than this copy, the page offers it. An installed copy upgrades
+# itself: it downloads the installer GitHub published, checks it against the
+# SHA-256 GitHub reports for that file, and hands it to a helper that waits
+# for this process to end, runs the installer silently and starts the new
+# copy with the same arguments. A source checkout only gets the news and a
+# link; git pull is its update.
+# --------------------------------------------------------------------------
+
+UPDATE_REPO = "jp244btc/video-grabber"
+# Both can point at a local server, to test the whole flow end to end.
+UPDATE_API = os.environ.get("VG_UPDATE_API") or f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest"
+UPDATE_DOWNLOAD_PREFIX = (
+    os.environ.get("VG_UPDATE_DOWNLOAD_PREFIX")
+    or f"https://github.com/{UPDATE_REPO}/releases/download/"
+)
+UPDATE_INTERVAL = 24 * 3600
+UPDATE_RETRY = 3600
+UPDATE_DIR = os.path.join(DATA_DIR, "updates")
+# An installed copy has Inno Setup's uninstaller beside it. A bare dist folder
+# does not, and an installer run from there would land somewhere else.
+CAN_INSTALL = FROZEN and os.path.isfile(os.path.join(APP_DIR, "unins000.exe"))
+
+UPDATE_STATE = {
+    "status": "idle",      # idle | checking | downloading | installing | error
+    "checked": 0.0,        # when GitHub last answered
+    "tried": 0.0,          # when it was last asked, answer or not
+    "latest": "",          # the newest version published
+    "available": False,    # newer than this copy, and not skipped
+    "url": "",             # the release page
+    "notes": "",           # release notes, trimmed
+    "asset": None,         # the installer: name, url, size, digest
+    "percent": 0,
+    "message": "",
+}
+UPDATE_LOCK = threading.Lock()
+
+
+def version_tuple(text):
+    return tuple(int(n) for n in re.findall(r"\d+", str(text or "")))
+
+
+def _set_update(**fields):
+    with UPDATE_LOCK:
+        UPDATE_STATE.update(fields)
+
+
+def update_snapshot():
+    with UPDATE_LOCK:
+        state = {k: v for k, v in UPDATE_STATE.items() if k != "asset"}
+    state["current"] = VERSION
+    state["can_install"] = CAN_INSTALL
+    state["check_enabled"] = bool(load_config().get("update_check", True))
+    return state
+
+
+def check_for_update():
+    """Ask GitHub for the newest release. Returns the state and never raises."""
+    _set_update(status="checking", tried=time.time(), message="")
+    try:
+        req = urllib.request.Request(
+            UPDATE_API,
+            headers={"Accept": "application/vnd.github+json", "User-Agent": f"VideoGrabber/{VERSION}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            release = json.loads(resp.read().decode("utf-8"))
+        latest = str(release.get("tag_name") or "").lstrip("vV")
+        if not version_tuple(latest):
+            raise ValueError("the newest release has no version number")
+        asset = None
+        for item in release.get("assets") or []:
+            name = str(item.get("name") or "")
+            if re.fullmatch(r"VideoGrabber-Setup-[\w.-]+\.exe", name, re.I):
+                asset = {
+                    "name": name,
+                    "url": str(item.get("browser_download_url") or ""),
+                    "size": int(item.get("size") or 0),
+                    "digest": str(item.get("digest") or ""),
+                }
+                break
+        newer = version_tuple(latest) > version_tuple(VERSION)
+        skipped = str(load_config().get("update_skip") or "")
+        _set_update(
+            status="idle", checked=time.time(), latest=latest,
+            available=newer and latest != skipped,
+            url=str(release.get("html_url") or f"https://github.com/{UPDATE_REPO}/releases"),
+            notes=str(release.get("body") or "").strip()[:1500],
+            asset=asset, message="",
+        )
+    except Exception as exc:
+        _set_update(status="idle", message=f"Could not check for updates: {str(exc)[:200]}")
+    return update_snapshot()
+
+
+def update_check_loop():
+    """A check soon after start, then daily; an unanswered one is retried hourly."""
+    time.sleep(20)
+    while True:
+        try:
+            if load_config().get("update_check", True):
+                with UPDATE_LOCK:
+                    now = time.time()
+                    due = (now - UPDATE_STATE["checked"] >= UPDATE_INTERVAL
+                           and now - UPDATE_STATE["tried"] >= UPDATE_RETRY)
+                if due:
+                    check_for_update()
+        except Exception:
+            pass
+        time.sleep(600)
+
+
+def download_update(asset, dest):
+    """Fetch the installer and prove it is the one GitHub published."""
+    if not asset or not str(asset.get("url") or "").startswith(UPDATE_DOWNLOAD_PREFIX):
+        raise RuntimeError("the release carries no installer from this project's GitHub")
+    digest = str(asset.get("digest") or "")
+    if not digest.lower().startswith("sha256:"):
+        raise RuntimeError("GitHub lists no checksum for the installer, so it stays uninstalled")
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    req = urllib.request.Request(asset["url"], headers={"User-Agent": f"VideoGrabber/{VERSION}"})
+    hasher = hashlib.sha256()
+    done = 0
+    part = dest + ".part"
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as out:
+            total = int(resp.headers.get("Content-Length") or asset.get("size") or 0)
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                hasher.update(chunk)
+                done += len(chunk)
+                if total:
+                    _set_update(percent=min(99, done * 100 // total))
+        if asset.get("size") and done != asset["size"]:
+            raise RuntimeError(f"the download is {done} bytes where GitHub says {asset['size']}")
+        if hasher.hexdigest().lower() != digest.split(":", 1)[1].strip().lower():
+            raise RuntimeError("the downloaded installer does not match GitHub's checksum")
+        os.replace(part, dest)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+    _set_update(percent=100)
+
+
+# Runs on after this process has quit. Inno Setup's /SILENT shows only a
+# progress bar; /MERGETASKS keeps the choices made at install time (the
+# Startup shortcut) but never fetches ffmpeg again; the installer's own log
+# lands beside ours for when something goes wrong.
+UPDATE_HELPER = r"""param([int]$AppPid, [string]$Installer, [string]$Exe, [string]$AppArgs, [string]$Log)
+function Note($m) { Add-Content -LiteralPath $Log -Value ("{0}  {1}" -f (Get-Date -Format s), $m) }
+Note "waiting for Video Grabber (pid $AppPid) to exit"
+$app = Get-Process -Id $AppPid -ErrorAction SilentlyContinue
+if ($app) { if ($app.WaitForExit(60000)) { Note "it exited" } else { Note "still running; the installer closes it" } }
+$setupLog = $Log + '.setup.log'
+Note "running $Installer"
+$setup = Start-Process -FilePath $Installer -ArgumentList @('/SILENT', '/NORESTART', '/SUPPRESSMSGBOXES', '/MERGETASKS=!ffmpeg', ('/LOG="' + $setupLog + '"')) -PassThru -Wait
+Note "installer exit code $($setup.ExitCode)"
+$argList = @('--no-browser') + @($AppArgs -split ' ' | Where-Object { $_ -and $_ -ne '--no-browser' })
+Note "starting $Exe $argList"
+Start-Process -FilePath $Exe -ArgumentList $argList
+Note "done"
+"""
+
+
+def install_update():
+    with UPDATE_LOCK:
+        asset = UPDATE_STATE["asset"]
+    try:
+        if not CAN_INSTALL:
+            raise RuntimeError("this copy was not set up by the installer, so it cannot replace itself")
+        if not asset:
+            raise RuntimeError("no installer is known yet; check for updates first")
+        with JOBS_LOCK:
+            active = any(j["status"] in ("queued", "downloading", "processing") for j in JOBS.values())
+        if active:
+            raise RuntimeError("finish or cancel the running downloads first")
+        _set_update(status="downloading", percent=0, message="")
+        installer = os.path.join(UPDATE_DIR, asset["name"])
+        download_update(asset, installer)
+
+        helper = os.path.join(UPDATE_DIR, "apply-update.ps1")
+        with open(helper, "w", encoding="utf-8") as fh:
+            fh.write(UPDATE_HELPER)
+        powershell = os.path.join(
+            os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+        _set_update(status="installing", message="Installing; Video Grabber restarts itself in a moment.")
+        # A hidden console of its own, not none at all: PowerShell started with
+        # DETACHED_PROCESS quits before it reads the script. The helper outlives
+        # this process either way.
+        subprocess.Popen(
+            [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper,
+             "-AppPid", str(os.getpid()), "-Installer", installer, "-Exe", sys.executable,
+             "-AppArgs", " ".join(sys.argv[1:]), "-Log", os.path.join(UPDATE_DIR, "update.log")],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        # Long enough for the page to read the state above; then out of the way.
+        threading.Timer(2.0, lambda: os._exit(0)).start()
+    except Exception as exc:
+        _set_update(status="error", message=f"Update failed: {exc}.")
+
+
+def tidy_updates():
+    """Installers already applied, and half-finished downloads, are dead weight."""
+    try:
+        names = os.listdir(UPDATE_DIR)
+    except OSError:
+        return
+    for name in names:
+        m = re.fullmatch(r"VideoGrabber-Setup-([\w.-]+)\.exe(\.part)?", name, re.I)
+        if m and (m.group(2) or version_tuple(m.group(1)) <= version_tuple(VERSION)):
+            try:
+                os.remove(os.path.join(UPDATE_DIR, name))
+            except OSError:
+                pass
+
+
+@app.route("/api/update")
+def api_update():
+    return jsonify(update_snapshot())
+
+
+@app.route("/api/update/check", methods=["POST"])
+def api_update_check():
+    return jsonify(check_for_update())
+
+
+@app.route("/api/update/skip", methods=["POST"])
+def api_update_skip():
+    version = str((request.get_json(force=True) or {}).get("version") or "").strip()
+    cfg = load_config()
+    cfg["update_skip"] = version
+    save_config(cfg)
+    with UPDATE_LOCK:
+        if UPDATE_STATE["latest"]:
+            newer = version_tuple(UPDATE_STATE["latest"]) > version_tuple(VERSION)
+            UPDATE_STATE["available"] = newer and UPDATE_STATE["latest"] != version
+    return jsonify(update_snapshot())
+
+
+@app.route("/api/update/install", methods=["POST"])
+def api_update_install():
+    with UPDATE_LOCK:
+        ready = bool(UPDATE_STATE["available"] and UPDATE_STATE["asset"])
+        busy = UPDATE_STATE["status"] in ("downloading", "installing")
+    if not CAN_INSTALL:
+        return jsonify({"error": "This copy runs from source or a bare folder; update it by hand."}), 400
+    if not ready:
+        return jsonify({"error": "No newer release is known. Check for updates first."}), 400
+    if not busy:
+        threading.Thread(target=install_update, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/")
 def index():
     cfg = load_config()
     return render_template(
         "index.html",
         download_dir=cfg["download_dir"],
+        update_check=bool(cfg.get("update_check", True)),
         ffmpeg_ok=bool(FFMPEG_DIR),
         ytdlp_version=yt_dlp.version.__version__,
         api_token=cfg["api_token"],
@@ -1182,6 +1453,8 @@ def main():
 
     if "--no-browser" not in sys.argv:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    tidy_updates()
+    threading.Thread(target=update_check_loop, daemon=True).start()
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
     return 0
 

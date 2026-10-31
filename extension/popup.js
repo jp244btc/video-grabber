@@ -139,6 +139,7 @@ async function init() {
       const d = await api("/api/ping");
       setStatus("ok", "yt-dlp " + d.ytdlp);
       connected = true;
+      if (d.update) say(`Video Grabber ${d.update} is available. Open the app to upgrade.`, true);
     } catch (e) {
       setStatus("bad", /token|refused/i.test(e.message) ? "bad token" : "not running");
       say(
