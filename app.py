@@ -955,6 +955,301 @@ def api_inspect():
 
 
 # --------------------------------------------------------------------------
+# Tab recording - for what has no file to download, a live Zoom call above
+# all. The extension records the tab with MediaRecorder and posts it here a
+# second at a time, so an hour-long call never sits in the browser as one
+# blob. Each slice is appended to a WebM under DATA_DIR\recordings; stopping
+# hands that file to ffmpeg, which writes an MP4 to the download folder. A
+# recording whose browser goes quiet (Edge crashed, the tab died) is finished
+# with what arrived, and one that an earlier run of the app was still taking
+# when it quit is converted at the next start, so a long call is never lost.
+# --------------------------------------------------------------------------
+
+RECORD_DIR = os.path.join(DATA_DIR, "recordings")
+RECORD_IDLE = 120         # seconds without a slice before the browser is given up on
+RECORDINGS = {}           # id -> a recording still taking slices
+RECORD_LOCK = threading.Lock()
+
+
+def recording_job(rec):
+    """The recording's row in the job list, which the popup and the page show."""
+    job = {
+        "id": rec["id"],
+        "url": rec["url"],
+        "title": rec["title"],
+        "status": "recording",
+        "percent": 0.0,
+        "speed": "",
+        "eta": "",
+        "message": "",
+        "filepath": "",
+        "filename": "",
+        "size": human_size(rec["bytes"]),
+        "mode": "record",
+        "cancel": False,
+        "started": rec["started"],
+    }
+    with JOBS_LOCK:
+        JOBS[rec["id"]] = job
+    return job
+
+
+def remove_recording(rec):
+    for path in (rec["path"], rec["meta"]):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def recording_name(outdir, title, started):
+    """'<tab title> 2026-11-02 19-30.mp4', with (2) and up if that is taken."""
+    base = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", title or "")[:100].strip(" .") or "Tab recording"
+    base += time.strftime(" %Y-%m-%d %H-%M", time.localtime(started))
+    name, n = base, 2
+    while os.path.exists(os.path.join(outdir, name + ".mp4")):
+        name = f"{base} ({n})"
+        n += 1
+    return os.path.join(outdir, name + ".mp4")
+
+
+def video_copyable(path):
+    """Can the recording's video go into the MP4 as it is?
+
+    It has to be H.264, and stored in the order it is shown (no B-frames),
+    because MediaRecorder's WebM carries presentation times only: the decode
+    times an MP4 needs are then simply the same. The first half minute is
+    enough to tell.
+    """
+    try:
+        probe = subprocess.run(
+            [tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+30",
+             "-show_entries", "stream=codec_name:packet=pts", "-of", "json", path],
+            capture_output=True, text=True, timeout=60, **NOWIN,
+        )
+        info = json.loads(probe.stdout or "{}")
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return False
+    codec = ((info.get("streams") or [{}])[0]).get("codec_name")
+    pts = [p["pts"] for p in info.get("packets") or [] if isinstance(p.get("pts"), int)]
+    return codec == "h264" and bool(pts) and all(a < b for a, b in zip(pts, pts[1:]))
+
+
+def convert_recording(src, out, seconds, job):
+    """MediaRecorder's WebM -> MP4.
+
+    H.264 video is copied across untouched, which takes seconds even for an
+    hour. Left to guess the missing decode times, ffmpeg's copy piles every
+    frame onto the first one's, so they are set from the presentation times
+    before ffmpeg ever sees the packets (an input-side filter, new in ffmpeg
+    7). VP8 or VP9, or H.264 that will not copy cleanly, or an older ffmpeg,
+    means re-encoding at a steady 30 fps. The sound is Opus, which becomes
+    AAC because every player takes that.
+    """
+    attempts = []
+    if video_copyable(src):
+        attempts.append((["-bsf:v", "setts=dts=PTS"], ["-c:v", "copy"]))
+    attempts.append(([], ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                          "-pix_fmt", "yuv420p", "-r", "30"]))
+    error = ""
+    for before, video in attempts:
+        proc = subprocess.Popen(
+            [tool("ffmpeg"), "-hide_banner", "-nostdin", "-y", "-loglevel", "error",
+             "-nostats", "-progress", "pipe:1", *before, "-i", src,
+             "-map", "0:v:0?", "-map", "0:a:0?", *video,
+             "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", out],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", **NOWIN,
+        )
+        said = []
+        for line in proc.stdout:
+            line = line.strip()
+            key, _, value = line.partition("=")
+            if key == "out_time_us" and value.isdigit() and seconds > 0:
+                with JOBS_LOCK:
+                    job["percent"] = round(min(99.0, int(value) / 1e4 / seconds), 1)
+            elif line and not re.fullmatch(r"\w+=\S*", line):
+                said = (said + [line])[-3:]       # ffmpeg's complaint, not its progress
+        proc.wait()
+        if proc.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 0:
+            return
+        error = " ".join(said) or f"ffmpeg exited with code {proc.returncode}"
+        try:
+            os.remove(out)
+        except OSError:
+            pass
+    raise RuntimeError(error)
+
+
+def finish_recording(rec, note=""):
+    """Make the MP4 of a recording that has stopped taking slices."""
+    job = rec["job"]
+    with JOBS_LOCK:
+        job.update(status="processing", percent=0.0, message="Making the MP4...")
+    src = rec["path"]
+    try:
+        if not os.path.isfile(src) or os.path.getsize(src) == 0:
+            remove_recording(rec)
+            raise RuntimeError("nothing was recorded.")
+        outdir = load_config()["download_dir"]
+        os.makedirs(outdir, exist_ok=True)
+        out = recording_name(outdir, rec["title"], rec["started"])
+        convert_recording(src, out, rec["last"] - rec["started"], job)
+    except Exception as exc:
+        kept = f" The raw recording is kept at {src}" if os.path.isfile(src) else ""
+        with JOBS_LOCK:
+            job.update(status="error", message=f"Could not make the MP4: {exc}{kept}")
+        return
+    remove_recording(rec)
+    with JOBS_LOCK:
+        job.update(status="done", percent=100.0, filepath=out, filename=os.path.basename(out),
+                   size=human_size(os.path.getsize(out)), message=note)
+
+
+@app.route("/api/record/start", methods=["POST"])
+def api_record_start():
+    if not FFMPEG_DIR:
+        return jsonify({"error": "Recording needs ffmpeg. Install it from the app page first."}), 400
+    data = request.get_json(force=True) or {}
+    rec_id = uuid.uuid4().hex[:12]
+    rec = {
+        "id": rec_id,
+        "path": os.path.join(RECORD_DIR, rec_id + ".webm"),
+        "meta": os.path.join(RECORD_DIR, rec_id + ".json"),
+        "title": str(data.get("title") or "").strip() or "Tab recording",
+        "url": str(data.get("url") or ""),
+        "started": time.time(),
+        "seq": 0,
+        "bytes": 0,
+    }
+    rec["last"] = rec["started"]
+    try:
+        os.makedirs(RECORD_DIR, exist_ok=True)
+        # Enough to name the MP4 if this run of the app does not live to make it.
+        with open(rec["meta"], "w", encoding="utf-8") as fh:
+            json.dump({k: rec[k] for k in ("title", "url", "started")}, fh)
+        open(rec["path"], "wb").close()
+    except OSError as exc:
+        return jsonify({"error": f"Cannot write the recording: {exc}"}), 500
+    rec["job"] = recording_job(rec)
+    with RECORD_LOCK:
+        RECORDINGS[rec_id] = rec
+    return jsonify({"id": rec_id})
+
+
+@app.route("/api/record/chunk", methods=["POST"])
+def api_record_chunk():
+    """One slice of a recording, appended in order.
+
+    A slice sent again because its answer was lost is acknowledged and not
+    written twice; one that skips ahead means something went missing.
+    """
+    rec_id = request.args.get("id") or ""
+    try:
+        seq = int(request.args.get("seq") or "")
+    except ValueError:
+        return jsonify({"error": "The slice has no number."}), 400
+    body = request.get_data(cache=False)
+    with RECORD_LOCK:
+        rec = RECORDINGS.get(rec_id)
+        if not rec:
+            return jsonify({"error": "That recording is not open any more."}), 404
+        if seq < rec["seq"]:
+            return jsonify({"ok": True, "bytes": rec["bytes"]})
+        if seq > rec["seq"]:
+            return jsonify({"error": f"Slice {rec['seq']} of the recording never arrived."}), 409
+        try:
+            with open(rec["path"], "ab") as fh:
+                fh.write(body)
+        except OSError as exc:
+            try:
+                os.truncate(rec["path"], rec["bytes"])     # no half slice for the retry to follow
+            except OSError:
+                pass
+            return jsonify({"error": f"Cannot write the recording: {exc}"}), 500
+        rec["seq"] += 1
+        rec["bytes"] += len(body)
+        rec["last"] = time.time()
+        size, seconds = rec["bytes"], rec["last"] - rec["started"]
+    with JOBS_LOCK:
+        rec["job"]["size"] = human_size(size)
+        rec["job"]["message"] = f"{human_duration(seconds) or '0:00'} recorded"
+    return jsonify({"ok": True, "bytes": size})
+
+
+@app.route("/api/record/stop", methods=["POST"])
+def api_record_stop():
+    """Close a recording and make its MP4; with discard, throw it away."""
+    data = request.get_json(force=True) or {}
+    with RECORD_LOCK:
+        rec = RECORDINGS.pop(str(data.get("id") or ""), None)
+    if not rec:
+        return jsonify({"error": "That recording is not open any more."}), 404
+    if data.get("discard"):
+        remove_recording(rec)
+        with JOBS_LOCK:
+            JOBS.pop(rec["id"], None)
+        return jsonify({"ok": True})
+    threading.Thread(target=finish_recording, args=(rec,), daemon=True).start()
+    return jsonify({"job_id": rec["id"]})
+
+
+def recording_watchdog():
+    """Finish recordings whose browser stopped sending.
+
+    A PC that slept looks the same from here, except that this loop did not
+    run either; then every recording gets a fresh start on its silence.
+    """
+    tick = time.time()
+    while True:
+        time.sleep(15)
+        now = time.time()
+        with RECORD_LOCK:
+            if now - tick > 60:
+                for rec in RECORDINGS.values():
+                    rec["last"] = max(rec["last"], now)
+            quiet = [r for r in RECORDINGS.values() if now - r["last"] > RECORD_IDLE]
+            for rec in quiet:
+                del RECORDINGS[rec["id"]]
+        tick = now
+        for rec in quiet:
+            threading.Thread(
+                target=finish_recording,
+                args=(rec, "The browser stopped sending; this is what arrived before that."),
+                daemon=True,
+            ).start()
+
+
+def recover_recordings():
+    """Make MP4s of recordings an earlier run was still taking when it quit."""
+    for path in glob.glob(os.path.join(RECORD_DIR, "*.webm")):
+        rec_id = os.path.splitext(os.path.basename(path))[0]
+        rec = {"id": rec_id, "path": path, "meta": os.path.join(RECORD_DIR, rec_id + ".json")}
+        try:
+            with open(rec["meta"], encoding="utf-8") as fh:
+                meta = json.load(fh)
+        except (OSError, ValueError):
+            meta = {}
+        try:
+            rec["last"] = os.path.getmtime(path)
+            rec["bytes"] = os.path.getsize(path)
+            rec["started"] = float(meta.get("started") or rec["last"])
+        except (OSError, TypeError, ValueError):
+            continue
+        if not rec["bytes"]:
+            remove_recording(rec)       # quit before the first slice: nothing to save
+            continue
+        rec["title"] = str(meta.get("title") or "Tab recording")
+        rec["url"] = str(meta.get("url") or "")
+        rec["job"] = recording_job(rec)
+        threading.Thread(
+            target=finish_recording,
+            args=(rec, "Recovered: the app quit while this was still recording."),
+            daemon=True,
+        ).start()
+
+
+# --------------------------------------------------------------------------
 # Housekeeping
 # --------------------------------------------------------------------------
 
@@ -1271,9 +1566,10 @@ def install_update():
         if not asset:
             raise RuntimeError("no installer is known yet; check for updates first")
         with JOBS_LOCK:
-            active = any(j["status"] in ("queued", "downloading", "processing") for j in JOBS.values())
+            active = any(j["status"] in ("queued", "downloading", "processing", "recording")
+                         for j in JOBS.values())
         if active:
-            raise RuntimeError("finish or cancel the running downloads first")
+            raise RuntimeError("finish or cancel the running downloads and recordings first")
         _set_update(status="downloading", percent=0, message="")
         installer = os.path.join(UPDATE_DIR, asset["name"])
         download_update(asset, installer)
@@ -1454,7 +1750,9 @@ def main():
     if "--no-browser" not in sys.argv:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     tidy_updates()
+    recover_recordings()
     threading.Thread(target=update_check_loop, daemon=True).start()
+    threading.Thread(target=recording_watchdog, daemon=True).start()
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
     return 0
 

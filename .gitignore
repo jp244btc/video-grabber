@@ -25,3 +25,6 @@ __pycache__/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Tab recordings still arriving (the MP4s land in Downloads)
+recordings/

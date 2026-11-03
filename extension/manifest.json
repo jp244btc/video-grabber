@@ -1,14 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Video Grabber",
-  "version": "1.3.0",
-  "description": "Detect video on the current page and hand it to your local yt-dlp downloader.",
+  "version": "1.4.0",
+  "description": "Detect video on the current page and hand it to your local yt-dlp downloader, or record the tab.",
   "permissions": [
     "webRequest",
     "webNavigation",
     "tabs",
     "storage",
-    "cookies"
+    "cookies",
+    "tabCapture",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"

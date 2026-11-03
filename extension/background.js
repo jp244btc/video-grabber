@@ -22,6 +22,9 @@
  * a three-second silent fragment: those players stream through Media Source
  * Extensions, so the card has to be the page, not anything the browser
  * fetched. See PAGE_SITES.
+ *
+ * It also runs tab recording, for a live call that has no file to find at
+ * all. See "Tab recording" below.
  */
 
 // Whole files and stream manifests worth offering.
@@ -240,14 +243,24 @@ async function record(tabId, item) {
   entry.items.unshift(item);
   if (entry.items.length > MAX_PER_TAB) entry.items.length = MAX_PER_TAB;
   await chrome.storage.session.set({ [key]: entry });
-
-  chrome.action.setBadgeBackgroundColor({ color: "#2f6feb" });
-  chrome.action.setBadgeText({ tabId, text: String(entry.items.length) });
+  await paintBadge(tabId);
 }
 
 async function clearTab(tabId) {
   await chrome.storage.session.remove(KEY(tabId));
-  try { await chrome.action.setBadgeText({ tabId, text: "" }); } catch (e) { /* tab gone */ }
+  await paintBadge(tabId);
+}
+
+// A tab's badge counts the videos found on it, except on the tab being
+// recorded, which reads REC for as long as the recording runs.
+async function paintBadge(tabId) {
+  const store = await chrome.storage.session.get(["rec", KEY(tabId)]);
+  const count = ((store[KEY(tabId)] || {}).items || []).length;
+  const recording = store.rec && store.rec.tabId === tabId;
+  try {
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: recording ? "#cf222e" : "#2f6feb" });
+    await chrome.action.setBadgeText({ tabId, text: recording ? "REC" : count ? String(count) : "" });
+  } catch (e) { /* tab gone */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,8 +376,151 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   serialised(() => chrome.storage.session.remove(KEY(tabId)));
 });
 
+// ---------------------------------------------------------------------------
+// Tab recording. A live call (Zoom's web client, say) streams over WebRTC
+// and has no URL for yt-dlp, so the popup can record the tab itself instead.
+// tabCapture gives a stream id; an offscreen document (offscreen.js) records
+// it and streams the recording to the app, which makes the MP4. What is
+// recording lives in session storage, because this worker is stopped and
+// started many times over an hour-long call while the recorder keeps going.
+// ---------------------------------------------------------------------------
+
+const RECORDER_PAGE = "offscreen.html";
+const SERVER_DEFAULTS = { server: "http://127.0.0.1:5001", token: "" };
+
+async function recording() {
+  return (await chrome.storage.session.get("rec")).rec || null;
+}
+
+async function recorderOpen() {
+  return (await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"] })).length > 0;
+}
+
+async function closeRecorder() {
+  try {
+    if (await recorderOpen()) await chrome.offscreen.closeDocument();
+  } catch (e) { /* already gone */ }
+}
+
+// The frame size the recording keeps throughout: the tab's own shape scaled
+// to fit 1920x1080, in even numbers, which video needs.
+function captureSize(tab) {
+  const w = tab.width || 1920;
+  const h = tab.height || 1080;
+  const scale = Math.min(1920 / w, 1080 / h);
+  const even = (n) => Math.max(2, 2 * Math.round(n / 2));
+  return { width: even(w * scale), height: even(h * scale) };
+}
+
+// Called from the popup's Record button. Opening the popup on a tab is what
+// lets tabCapture take that tab; nothing else can start a recording.
+let starting = false;
+async function startRecording(tabId) {
+  if (starting) throw new Error("A recording is already starting.");
+  starting = true;
+  try {
+    if (await recording()) throw new Error("Another tab is recording. Stop that one first.");
+    if (!chrome.tabCapture || !chrome.offscreen) throw new Error("This browser is too old to record tabs.");
+    return await beginRecording(tabId);
+  } finally {
+    starting = false;
+  }
+}
+
+async function beginRecording(tabId) {
+  const cfg = await chrome.storage.sync.get(SERVER_DEFAULTS);
+  const tab = await chrome.tabs.get(tabId);
+  if (!(await recorderOpen())) {
+    await chrome.offscreen.createDocument({
+      url: RECORDER_PAGE,
+      reasons: ["USER_MEDIA"],
+      justification: "Records the tab you asked Video Grabber to record.",
+    });
+  }
+  let answer;
+  try {
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
+    answer = await chrome.runtime.sendMessage({
+      target: "offscreen",
+      type: "start",
+      streamId,
+      server: cfg.server,
+      token: cfg.token,
+      title: tab.title || "",
+      url: tab.url || "",
+      ...captureSize(tab),
+    });
+  } catch (e) {
+    answer = { error: `This tab cannot be recorded: ${e.message}` };
+  }
+  if (!answer || answer.error) {
+    await closeRecorder();
+    throw new Error((answer && answer.error) || "The recorder did not start.");
+  }
+  const rec = { id: answer.id, tabId, title: tab.title || "", startedAt: Date.now() };
+  await serialised(async () => {
+    await chrome.storage.session.set({ rec });
+    await chrome.storage.session.remove("recLast");
+    await paintBadge(tabId);
+  });
+  return rec;
+}
+
+async function stopRecording() {
+  const rec = await recording();
+  if (!rec) return { error: "Nothing is recording." };
+  let result = null;
+  try {
+    result = await chrome.runtime.sendMessage({ target: "offscreen", type: "stop" });
+  } catch (e) { /* the recorder is gone */ }
+  return endRecording(rec.id, result || { error: "The recorder had already stopped." });
+}
+
+// Wind up a recording, however it ended: stopped from the popup, or on its
+// own because the tab closed or the recorder failed. The answer is kept for
+// the popup to show next time it opens.
+function endRecording(id, result) {
+  return serialised(async () => {
+    const rec = await recording();
+    if (!rec || rec.id !== id) return result;
+    if (!result.jobId) {
+      // The recorder could not say goodbye to the app, so say it from here;
+      // the app makes the MP4 from whatever reached it.
+      try {
+        const cfg = await chrome.storage.sync.get(SERVER_DEFAULTS);
+        const res = await fetch(cfg.server.replace(/\/+$/, "") + "/api/record/stop", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-VG-Token": cfg.token },
+          body: JSON.stringify({ id }),
+        });
+        if (res.ok) result = { ...result, jobId: (await res.json()).job_id };
+      } catch (e) { /* the app is gone too */ }
+    }
+    await chrome.storage.session.remove("rec");
+    await chrome.storage.session.set({
+      recLast: { jobId: result.jobId || "", error: result.error || "", title: rec.title, at: Date.now() },
+    });
+    await paintBadge(rec.tabId);
+    await closeRecorder();
+    return result;
+  });
+}
+
+// What the popup shows. A recording whose recorder has vanished (it crashed,
+// or the browser threw it away) is wound up rather than shown as running.
+async function recordingState() {
+  let rec = await recording();
+  if (rec && !(await recorderOpen())) {
+    await endRecording(rec.id, { error: "The recorder stopped unexpectedly." });
+    rec = null;
+  }
+  const { recLast } = await chrome.storage.session.get("recLast");
+  return { rec, last: recLast || null };
+}
+
 // The popup asks for the current tab's finds rather than reading storage
-// itself, so the shape stays in one place.
+// itself, so the shape stays in one place. Messages for the recorder carry
+// target "offscreen" and are answered there, not here.
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg && msg.type === "getFinds") {
     chrome.storage.session.get(KEY(msg.tabId)).then((store) => {
@@ -374,6 +530,22 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   }
   if (msg && msg.type === "clearFinds") {
     serialised(() => clearTab(msg.tabId)).then(() => reply(true));
+    return true;
+  }
+  if (msg && msg.type === "recStart") {
+    startRecording(msg.tabId).then((rec) => reply({ rec }), (e) => reply({ error: e.message }));
+    return true;
+  }
+  if (msg && msg.type === "recStop") {
+    stopRecording().then(reply, (e) => reply({ error: e.message }));
+    return true;
+  }
+  if (msg && msg.type === "recState") {
+    recordingState().then(reply, (e) => reply({ rec: null, last: null, error: e.message }));
+    return true;
+  }
+  if (msg && msg.type === "recEnded") {
+    endRecording(msg.id, msg).then(() => reply(true));
     return true;
   }
   return false;

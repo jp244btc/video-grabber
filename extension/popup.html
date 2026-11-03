@@ -112,6 +112,21 @@
     border: 1px solid var(--border); background: var(--bg); color: var(--text);
   }
 
+  .rec {
+    margin: 4px 14px 8px; padding: 10px; border: 1px solid var(--border); border-radius: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .rec.on { border-color: var(--err); background: color-mix(in srgb, var(--err) 7%, transparent); }
+  .rec .t { flex: 1; min-width: 0; }
+  .rec .t b { display: block; font-size: 12px; }
+  .rec .t span { display: block; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+  .rec .t a { color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .rec button {
+    flex: 0 0 auto; min-width: 88px; padding: 6px 12px; border-radius: 8px; border: 0; cursor: pointer;
+    background: var(--err); color: #fff; font: inherit; font-size: 12px; font-weight: 600;
+  }
+  .rec button:disabled { opacity: .6; cursor: default; }
+
   footer { padding: 8px 14px 10px; display: flex; gap: 12px; font-size: 11px; border-top: 1px solid var(--border); }
   footer a { color: var(--accent); text-decoration: none; cursor: pointer; }
   footer a:hover { text-decoration: underline; }
@@ -129,6 +144,14 @@
 <div id="msg"></div>
 
 <div id="cards"></div>
+
+<div class="rec" id="rec">
+  <div class="t">
+    <b id="rec-head">Record this tab</b>
+    <span id="rec-note">&nbsp;</span>
+  </div>
+  <button id="rec-btn" disabled>● Record</button>
+</div>
 
 <div class="page">
   <div class="t">

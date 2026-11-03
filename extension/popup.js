@@ -9,6 +9,9 @@
  * Below the cards, "Grab page" hands the page URL to yt-dlp, which knows the
  * site and picks the best rendition itself. Better for a single-video page;
  * useless on a timeline, which is what the cards are for.
+ *
+ * "Record this tab" is for what neither can fetch: a live call has no file at
+ * all, so the tab's picture and sound are recorded into an MP4 instead.
  */
 
 const $ = (id) => document.getElementById(id);
@@ -110,6 +113,8 @@ async function reloadIfUpdated() {
     return false;
   }
   if (!onDisk || onDisk === chrome.runtime.getManifest().version) return false;
+  // A reload would end a recording halfway through a call. It can wait.
+  if ((await chrome.storage.session.get("rec")).rec) return false;
   // One try per minute, so a reload that does not take cannot loop.
   const last = Number((await chrome.storage.local.get("selfReloadAt")).selfReloadAt || 0);
   if (Date.now() - last < 60000) return false;
@@ -152,6 +157,7 @@ async function init() {
   }
 
   await renderCards(connected);
+  await showRecording();
 }
 
 // Cards are appended, never rebuilt, so a card mid-download keeps its state
@@ -381,6 +387,110 @@ $("grab-page").addEventListener("click", async (e) => {
     say(err.message, false);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Record this tab. The background worker and its offscreen recorder do the
+// work and carry on after this popup closes; this only shows where things
+// stand and passes on Record and Stop.
+// ---------------------------------------------------------------------------
+
+const REC_HINT = "Picture and sound into an MP4, for a live call or anything with no file to grab.";
+let recTimer = null;
+let recView = 0;          // bumped on every redraw, so a timer from before stops
+
+function clock(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(s / 60) % 60;
+  const ss = String(s % 60).padStart(2, "0");
+  return s >= 3600 ? `${Math.floor(s / 3600)}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+}
+
+async function findJob(id) {
+  try { return (await api("/api/jobs")).find((j) => j.id === id) || null; } catch (e) { return null; }
+}
+
+async function showRecording() {
+  clearTimeout(recTimer);
+  const view = ++recView;
+  const { rec, last } = (await chrome.runtime.sendMessage({ type: "recState" })) || {};
+  if (view !== recView) return;
+  const btn = $("rec-btn");
+  const note = $("rec-note");
+  $("rec").classList.toggle("on", !!rec);
+
+  if (rec) {
+    const here = tab && rec.tabId === tab.id;
+    $("rec-head").textContent = here ? "Recording this tab" : "Recording another tab";
+    btn.textContent = "■ Stop";
+    btn.disabled = false;
+    btn.onclick = stopClicked;
+    let size = "";
+    let ticks = 0;
+    const tick = async () => {
+      if (connectedState && ticks++ % 3 === 0) {
+        const job = await findJob(rec.id);
+        if (job) size = job.size;
+      }
+      if (view !== recView) return;
+      note.textContent = [clock(Date.now() - rec.startedAt), size, here ? "" : rec.title]
+        .filter(Boolean).join("  ·  ");
+      recTimer = setTimeout(tick, 1000);
+    };
+    tick();
+    return;
+  }
+
+  $("rec-head").textContent = "Record this tab";
+  btn.textContent = "● Record";
+  btn.disabled = !connectedState || !tab;
+  btn.onclick = recordClicked;
+  note.textContent = REC_HINT;
+  // The recording before this one, while it turns into an MP4 and after.
+  if (last && Date.now() - last.at < 3600000) {
+    if (last.error) say(last.error, false);
+    if (last.jobId && connectedState) followSave(last.jobId, view);
+  }
+}
+
+async function followSave(jobId, view) {
+  const note = $("rec-note");
+  const job = await findJob(jobId);
+  if (!job || view !== recView) return;     // no job: the app restarted since
+  if (job.status === "processing") {
+    note.textContent = `Saving the recording… ${(job.percent || 0).toFixed(0)}%`;
+    recTimer = setTimeout(() => followSave(jobId, view), 1000);
+  } else if (job.status === "done") {
+    const link = document.createElement("a");
+    link.textContent = job.filename;
+    link.title = "Show in folder";
+    link.addEventListener("click", () => api("/api/reveal", { job_id: job.id }).catch((e) => say(e.message, false)));
+    note.textContent = "Saved ";
+    note.append(link, job.message ? `. ${job.message}` : "");
+  } else if (job.status === "error") {
+    note.textContent = REC_HINT;
+    say(job.message || "The recording could not be saved.", false);
+  }
+}
+
+async function recordClicked() {
+  const btn = $("rec-btn");
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  const r = await chrome.runtime.sendMessage({ type: "recStart", tabId: tab.id });
+  if (r && r.error) say(r.error, false);
+  await showRecording();
+}
+
+async function stopClicked() {
+  clearTimeout(recTimer);
+  recView++;
+  const btn = $("rec-btn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  const r = await chrome.runtime.sendMessage({ type: "recStop" });
+  if (r && r.error) say(r.error, false);
+  await showRecording();
+}
 
 $("clear").addEventListener("click", async () => {
   if (!tab) return;

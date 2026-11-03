@@ -58,6 +58,22 @@ Instagram cookies travel with the request the way Zoom's do, which keeps
 public posts clear of the anonymous rate limit and lets yt-dlp use the
 signed-in API for posts only your account can see.
 
+**Recording a tab.** A live call has nothing to download: Zoom's web client
+streams the meeting over WebRTC, and there is no file for yt-dlp to fetch. For
+that, and for anything else the cards and Grab page cannot reach, the popup's
+**Record this tab** records the tab's picture and sound instead. Click
+**● Record** on the tab you want, carry on, and click **■ Stop** when it is
+over. The toolbar badge reads **REC** on that tab the whole time, and the tab
+stays audible while it records. Closing the tab stops the recording too. The
+recording goes to the local app a second at a time, so an hour-long call never
+piles up in the browser's memory, and the app turns it into
+`<tab title> <date> <time>.mp4` in your Downloads folder. A Zoom meeting that
+Edge joins in audio-only mode records fine: the picture is the name tiles,
+and the voices are all there. What gets recorded is what the tab plays, so
+your own microphone is not part of it. If the browser crashes mid-call,
+whatever had reached the app is saved two minutes later; if the app itself
+quits, the next start saves it.
+
 **From the app page.** Paste any link, optionally look it up to choose a
 quality, and download. Extras that the extension's cards do not expose:
 
@@ -151,7 +167,8 @@ is not part of the installer.
 | `templates/index.html` | The app page, one file |
 | `extension/` | The Chrome/Edge extension (Manifest V3) |
 | `extension/background.js` | Media sniffing and the per-tab badge |
-| `extension/popup.js` | The card popup |
+| `extension/popup.js` | The card popup, and Record this tab |
+| `extension/offscreen.js` | The tab recorder (MediaRecorder in an offscreen document) |
 | `extension/pair.js` | Reads the token off the app page so pairing is automatic |
 | `extension/make_icons.py` | Generates the PNG and ICO icons from code |
 | `installer/VideoGrabber.iss` | Inno Setup script |
@@ -165,6 +182,8 @@ is not part of the installer.
 - Chrome and Edge only for the extension. Firefox declares background scripts
   differently under Manifest V3 and would need its own manifest.
 - Live streams record until you cancel.
+- Recording a tab needs Chrome or Edge 116 or newer, and works on web pages
+  only: browser pages such as `edge://settings` cannot be captured.
 - Downloading is not the same as having the right to republish.
 
 ## License
